@@ -15,13 +15,22 @@ const firebaseConfig = {
   databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
 };
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app);
-export const rtdb = getDatabase(app);
+const isConfigured = !!firebaseConfig.apiKey && !!firebaseConfig.projectId;
 
-if (import.meta.env.VITE_USE_EMULATOR === 'true') {
-  connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+let app: any = null;
+let auth: any = null;
+let db: any = null;
+let rtdb: any = null;
+
+if (isConfigured) {
+  app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+  rtdb = getDatabase(app);
+
+  if (import.meta.env.VITE_USE_EMULATOR === 'true') {
+    connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+  }
 }
 
-export default app;
+export { app, auth, db, rtdb, isConfigured };
