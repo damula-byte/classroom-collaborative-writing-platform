@@ -1,0 +1,33 @@
+{
+  "rules": {
+    ".read": "auth != null",
+    ".write": "auth != null",
+
+    "classes": {
+      "$classId": {
+        "live": {
+          "$groupId": {
+            "updates": {
+              ".read": "auth != null",
+              ".write": "auth != null"
+            },
+            "awareness": {
+              "$uid": {
+                ".read": "auth != null",
+                ".write": "auth != null"
+              }
+            }
+          }
+        },
+        "presence": {
+          "$groupId": {
+            "$studentUid": {
+              ".read": "auth != null",
+              ".write": "auth != null"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: Is the user authenticated?
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: Is the user the teacher of this class?
+    function isClassTeacher(classId) {
+      return isAuthenticated() &&
+        request.auth.uid == get(/databases/$(database)/documents/classes/$(classId)).data.teacherId;
+    }
+
+    // Helper: Get the student record for this user in this class
+    function getStudent(classId) {
+      return get(/databases/$(database)/documents/classes/$(classId)/students/$(request.auth.uid)).data;
+    }
+
+    // Helper: Is this user a student in the given group?
+    function isStudentInGroup(classId, groupId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/classes/$(classId)/students/$(request.auth.uid)) &&
+        getStudent(classId).groupId == groupId;
+    }
+
+    // Helper: Is this user a student in this class at all?
+    function isStudentInClass(classId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/classes/$(classId)/students/$(request.auth.uid));
+    }
+
+    // ---- Classes ----
+    match /classes/{classId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isClassTeacher(classId);
+    }
+
+    // ---- Groups ----
+    match /classes/{classId}/groups/{groupId} {
+      allow read: if isAuthenticated() && isStudentInClass(classId) || isClassTeacher(classId);
+      allow write: if isClassTeacher(classId);
+    }
+
+    // ---- Students ----
+    match /classes/{classId}/students/{studentUid} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == studentUid;
+      allow update: if isClassTeacher(classId) || request.auth.uid == studentUid;
+      allow delete: if isClassTeacher(classId);
+    }
+
+    // ---- Documents ----
+    match /documents/{groupId} {
+      // Teacher can read all; student can ONLY read their own assigned group
+      allow read: if isClassTeacher(resource.data.classId) ||
+        isStudentInGroup(resource.data.classId, groupId);
+
+      // Writes allowed only if teacher OR (student in group AND document NOT locked)
+      allow write: if isClassTeacher(resource.data.classId) ||
+        (isStudentInGroup(resource.data.classId, groupId) &&
+         resource.data.locked == false &&
+         request.resource.data.locked == false);
+    }
+
+    // ---- Annotations ----
+    match /annotations/{annotationId} {
+      allow read: if isClassTeacher(resource.data.classId) ||
+        isStudentInGroup(resource.data.classId, resource.data.groupId);
+      // Only teacher can create/edit annotations
+      allow write: if isClassTeacher(resource.data.classId);
+    }
+  }
+}
