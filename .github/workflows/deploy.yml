@@ -34,16 +34,9 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Create .env from secret if provided
+      - name: Setup Environment
         env:
           ENV_CONTENT: ${{ secrets.ENV_FILE }}
-        run: |
-          if [ -n "$ENV_CONTENT" ]; then
-            printf "%s\n" "$ENV_CONTENT" > .env
-          fi
-
-      - name: Build
-        env:
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
           VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
@@ -51,6 +44,22 @@ jobs:
           VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_DATABASE_URL: ${{ secrets.VITE_FIREBASE_DATABASE_URL }}
+        run: |
+          if [ -n "$ENV_CONTENT" ]; then
+            printf "%s\n" "$ENV_CONTENT" > .env
+          else
+            [ -n "$VITE_FIREBASE_API_KEY" ] && echo "VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY" >> .env
+            [ -n "$VITE_FIREBASE_AUTH_DOMAIN" ] && echo "VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN" >> .env
+            [ -n "$VITE_FIREBASE_PROJECT_ID" ] && echo "VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID" >> .env
+            [ -n "$VITE_FIREBASE_STORAGE_BUCKET" ] && echo "VITE_FIREBASE_STORAGE_BUCKET=$VITE_FIREBASE_STORAGE_BUCKET" >> .env
+            [ -n "$VITE_FIREBASE_MESSAGING_SENDER_ID" ] && echo "VITE_FIREBASE_MESSAGING_SENDER_ID=$VITE_FIREBASE_MESSAGING_SENDER_ID" >> .env
+            [ -n "$VITE_FIREBASE_APP_ID" ] && echo "VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID" >> .env
+            [ -n "$VITE_FIREBASE_DATABASE_URL" ] && echo "VITE_FIREBASE_DATABASE_URL=$VITE_FIREBASE_DATABASE_URL" >> .env
+          fi
+          echo "=== Configured variables in .env ==="
+          grep -o '^VITE_[^=]*' .env || echo "No VITE variables found"
+
+      - name: Build
         run: npm run build
 
       - name: Upload artifact
