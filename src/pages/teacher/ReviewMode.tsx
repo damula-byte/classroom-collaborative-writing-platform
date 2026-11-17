@@ -194,7 +194,7 @@ export function ReviewMode() {
           <div className="flex justify-between h-16">
             <div className="flex items-center gap-4">
               <Link to="/teacher/dashboard" className="text-slate-600 hover:text-slate-900">
-                <- Dashboard
+                ← Dashboard
               </Link>
               <h1 className="text-xl font-bold text-slate-900">Review Mode</h1>
               {synced && (
