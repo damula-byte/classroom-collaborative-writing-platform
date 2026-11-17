@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+﻿import { useState, useEffect, useCallback } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Button, StatusBadge, Modal, Toast } from '@/components/common';
 import { CollaborativeEditor } from '@/components/editor/CollaborativeEditor';
@@ -25,7 +25,7 @@ export function ReviewMode() {
   const groupId = rawGroupId || null;
   const { document, loading } = useDocument(groupId);
   const { annotations, setAnnotations } = useAnnotations(groupId);
-  const { user } = useAuth();
+  const { user, teacherName } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [wordCount, setWordCount] = useState(0);
   const [showCommentModal, setShowCommentModal] = useState(false);
@@ -131,7 +131,7 @@ export function ReviewMode() {
         documentId: groupId,
         groupId,
         authorId: user.uid,
-        authorName: user.displayName || 'Teacher',
+        authorName: teacherName,
         type: 'comment',
         selectedText,
         comment: commentText,
@@ -143,7 +143,7 @@ export function ReviewMode() {
         documentId: groupId,
         groupId,
         authorId: user.uid,
-        authorName: user.displayName || 'Teacher',
+        authorName: teacherName,
         type: 'comment',
         from: 0,
         to: 0,
@@ -194,7 +194,7 @@ export function ReviewMode() {
           <div className="flex justify-between h-16">
             <div className="flex items-center gap-4">
               <Link to="/teacher/dashboard" className="text-slate-600 hover:text-slate-900">
-                ← Dashboard
+                <- Dashboard
               </Link>
               <h1 className="text-xl font-bold text-slate-900">Review Mode</h1>
               {synced && (
@@ -233,7 +233,7 @@ export function ReviewMode() {
                 onChange={handleContentChange}
                 onSelectText={handleTextSelect}
                 editable={isEditing}
-                user={{ name: user?.displayName || 'Teacher', color: '#ef4444' }}
+                user={{ name: teacherName, color: '#ef4444' }}
               />
 
                {!isEditing && annotations.length > 0 && (
@@ -250,7 +250,7 @@ export function ReviewMode() {
                )}
 
               <div className="mt-4 text-sm text-slate-500">
-                Word count: {wordCount} • Last updated: {'lastUpdated' in (document || {}) ? new Date((document as any).updatedAt).toLocaleString() : 'Never'}
+                Word count: {wordCount} - Last updated: {'lastUpdated' in (document || {}) ? new Date((document as any).updatedAt).toLocaleString() : 'Never'}
               </div>
             </div>
 

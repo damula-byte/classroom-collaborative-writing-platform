@@ -9,7 +9,7 @@ import { subscribeToClasses, createClass, deleteClass, getStudentCount } from '@
 import { Class } from '@/types';
 
 export function TeacherDashboard() {
-  const { user, logout } = useAuth();
+  const { user, teacherName, logout } = useAuth();
   const { metrics, limits } = useQuotaMonitor();
   const [classes, setClasses] = useState<Class[]>([]);
   const [studentCounts, setStudentCounts] = useState<Record<string, number>>({});
@@ -39,11 +39,23 @@ export function TeacherDashboard() {
     allowStudentGroupSelection: boolean;
   }) => {
     try {
-      await createClass({
+      const classId = await createClass({
         ...data,
         teacherId: user!.uid,
-        teacherName: user!.displayName || user!.email || 'Teacher',
+        teacherName: teacherName || 'Teacher',
       });
+      const newClass: Class = {
+        id: classId,
+        ...data,
+        teacherId: user!.uid,
+        teacherName: teacherName || 'Teacher',
+        status: 'ACTIVE',
+        allowStudentGroupSelection: data.allowStudentGroupSelection,
+        studentCount: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      setClasses((prev) => [newClass, ...prev]);
       setToast({ message: 'Class created successfully!', type: 'success' });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to create class', type: 'error' });
@@ -74,7 +86,7 @@ export function TeacherDashboard() {
             </div>
             <div className="flex items-center gap-4">
               <span className="text-sm text-slate-600">
-                {user?.isAnonymous ? 'Anonymous' : user?.email}
+                {teacherName}
               </span>
               <Button variant="ghost" onClick={() => logout()}>
                 Logout

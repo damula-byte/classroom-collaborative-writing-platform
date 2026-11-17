@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect } from 'react';
-import { onAuthStateChanged, User, signOut, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import { onAuthStateChanged, User, signOut, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, updateProfile } from 'firebase/auth';
 import { auth } from '@/config/firebase';
 
 export function useAuth() {
@@ -16,6 +16,18 @@ export function useAuth() {
 
   const loginTeacher = async (email: string, password: string) => {
     return signInWithEmailAndPassword(auth, email, password);
+  };
+
+  const loginTeacherGuest = async (name: string) => {
+    const cred = await signInAnonymously(auth);
+    if (cred.user) {
+      try {
+        await updateProfile(cred.user, { displayName: name });
+      } catch (e) {
+        localStorage.setItem('teacherName', name);
+      }
+    }
+    return cred;
   };
 
   const registerTeacher = async (email: string, password: string) => {
@@ -37,11 +49,14 @@ export function useAuth() {
     user,
     loading,
     loginTeacher,
+    loginTeacherGuest,
     registerTeacher,
     loginGoogle,
     loginStudent,
     logout,
     isTeacher: !!user && !user.isAnonymous,
+    isGuestTeacher: !!user && user.isAnonymous,
     isStudent: !!user && user.isAnonymous,
+    teacherName: user?.displayName || (typeof window !== 'undefined' ? localStorage.getItem('teacherName') : null) || user?.email || 'Teacher',
   };
 }

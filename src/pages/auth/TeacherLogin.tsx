@@ -6,10 +6,12 @@ import { useAuth } from '@/hooks/useAuth';
 export function TeacherLogin() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [guestName, setGuestName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
-  const { loginTeacher, loginGoogle } = useAuth();
+  const [guestLoading, setGuestLoading] = useState(false);
+  const { loginTeacher, loginTeacherGuest, loginGoogle } = useAuth();
   const navigate = useNavigate();
 
   const handleEmailLogin = async (e: React.FormEvent) => {
@@ -36,6 +38,23 @@ export function TeacherLogin() {
       setError(err.message || 'Google login failed');
     } finally {
       setGoogleLoading(false);
+    }
+  };
+
+  const handleGuestLogin = async () => {
+    if (!guestName.trim()) {
+      setError('Please enter your name');
+      return;
+    }
+    setError('');
+    setGuestLoading(true);
+    try {
+      await loginTeacherGuest(guestName.trim());
+      navigate('/teacher/dashboard');
+    } catch (err: any) {
+      setError(err.message || 'Guest login failed');
+    } finally {
+      setGuestLoading(false);
     }
   };
 
@@ -91,6 +110,34 @@ export function TeacherLogin() {
             Register here
           </a>
         </p>
+
+        <div className="flex items-center gap-3 mt-6 mb-6">
+          <div className="flex-1 h-px bg-slate-200"></div>
+          <span className="text-sm text-slate-400">or</span>
+          <div className="flex-1 h-px bg-slate-200"></div>
+        </div>
+
+        <div className="bg-slate-50 rounded-xl p-4">
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Continue as Guest</h3>
+          <Input
+            label="Your Name"
+            placeholder="e.g. Teacher An"
+            value={guestName}
+            onChange={(e) => setGuestName(e.target.value)}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            loading={guestLoading}
+            onClick={handleGuestLogin}
+            className="w-full mt-3"
+          >
+            Continue as Guest
+          </Button>
+          <p className="text-xs text-slate-400 mt-2 text-center">
+            No password needed — just enter your name
+          </p>
+        </div>
       </div>
     </div>
   );

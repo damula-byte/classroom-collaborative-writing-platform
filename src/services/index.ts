@@ -58,11 +58,15 @@ export function subscribeToClass(classId: string, cb: (cls: Class | null) => voi
 export function subscribeToClasses(teacherId: string, cb: (classes: Class[]) => void) {
   const q = query(
     collection(db, 'classes'),
-    where('teacherId', '==', teacherId),
-    orderBy('createdAt', 'desc')
+    where('teacherId', '==', teacherId)
   );
   return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(d => ({ id: d.id, ...d.data() } as Class)));
+    const results = snap.docs.map(d => ({ id: d.id, ...d.data() } as Class));
+    results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    cb(results);
+  }, (err) => {
+    console.error('subscribeToClasses error:', err);
+    cb([]);
   });
 }
 
@@ -97,10 +101,19 @@ export async function updateGroup(classId: string, groupId: string, data: Partia
   await updateDoc(doc(db, `classes/${classId}/groups`, groupId), data);
 }
 
-export function subscribeToGroups(classId: string, cb: (groups: Group[]) => void) {
-  const q = query(collection(db, `classes/${classId}/groups`), orderBy('createdAt'));
+export function subscribeToGroups(
+  classId: string,
+  cb: (groups: Group[]) => void,
+  onError?: (err: Error) => void
+) {
+  const q = query(collection(db, `classes/${classId}/groups`));
   return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(d => ({ id: d.id, ...d.data() } as Group)));
+    const results = snap.docs.map(d => ({ id: d.id, ...d.data() } as Group));
+    results.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    cb(results);
+  }, (err) => {
+    console.error('subscribeToGroups error:', err);
+    onError?.(err);
   });
 }
 
@@ -239,11 +252,12 @@ export function subscribeToAnnotations(
 ) {
   const q = query(
     collection(db, 'annotations'),
-    where('groupId', '==', groupId),
-    orderBy('createdAt', 'desc')
+    where('groupId', '==', groupId)
   );
   return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(d => ({ id: d.id, ...d.data() } as Annotation)));
+    const results = snap.docs.map(d => ({ id: d.id, ...d.data() } as Annotation));
+    results.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    cb(results);
   });
 }
 
