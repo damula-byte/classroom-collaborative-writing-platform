@@ -46,8 +46,9 @@ export function StudentWorkspace() {
     debouncedSave(text, wc);
   }, [debouncedSave]);
 
+  // Sync document content only on initial load
   useEffect(() => {
-    if (document?.textContent) {
+    if (document?.textContent && !content) {
       setContent(document.textContent);
       setWordCount(document.wordCount || 0);
     }

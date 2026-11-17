@@ -1,5 +1,4 @@
-﻿import { useEffect } from 'react';
-import { useEditor, EditorContent } from '@tiptap/react';
+﻿import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { Collaboration } from '@tiptap/extension-collaboration';
 import * as Y from 'yjs';
@@ -52,12 +51,6 @@ export function CollaborativeEditor({
       }
     },
   });
-
-  useEffect(() => {
-    if (editor && content !== editor.getText()) {
-      editor.commands.setContent(content);
-    }
-  }, [content, editor]);
 
   if (!editor) return null;
 
