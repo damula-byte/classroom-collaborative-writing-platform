@@ -3,3 +3,4 @@ export { Input } from './Input';
 export { Modal } from './Modal';
 export { StatusBadge } from './StatusBadge';
 export { Toast } from './Toast';
+export { ErrorBoundary } from './ErrorBoundary';

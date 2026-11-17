@@ -19,7 +19,7 @@ export function useCollaboration(
   });
 
   useEffect(() => {
-    if (!ydoc || !groupId || !classId) return;
+    if (!ydoc || !groupId || !classId || !rtdb) return;
 
     const updatesPath = `classes/${classId}/live/${groupId}/updates`;
     const awarenessPath = `classes/${classId}/live/${groupId}/awareness`;

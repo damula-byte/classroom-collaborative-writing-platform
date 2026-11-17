@@ -7,7 +7,7 @@ export function usePresence(classId: string | null, groupId: string | null, uid:
   const [peers, setPeers] = useState<Record<string, PresenceEntry>>({});
 
   useEffect(() => {
-    if (!classId || !groupId || !uid) return;
+    if (!classId || !groupId || !uid || !rtdb) return;
 
     const presenceRef = ref(rtdb, `classes/${classId}/presence/${groupId}`);
     const connectedRef = ref(rtdb, '.info/connected');
@@ -37,7 +37,7 @@ export function useGroupPresence(classId: string | null, groupId: string | null)
   const [peers, setPeers] = useState<Record<string, PresenceEntry>>({});
 
   useEffect(() => {
-    if (!classId || !groupId) return;
+    if (!classId || !groupId || !rtdb) return;
 
     const presenceRef = ref(rtdb, `classes/${classId}/presence/${groupId}`);
     const unsub = onValue(presenceRef, (snap) => {

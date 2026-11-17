@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import { ErrorBoundary } from '@/components/common';
 import { isConfigured } from './config/firebase';
 import './index.css';
 
@@ -34,6 +35,8 @@ function SetupNotice() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    {isConfigured ? <App /> : <SetupNotice />}
+    <ErrorBoundary>
+      {isConfigured ? <App /> : <SetupNotice />}
+    </ErrorBoundary>
   </React.StrictMode>
 );

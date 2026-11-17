@@ -88,6 +88,20 @@ export async function createGroup(classId: string, name: string): Promise<string
     locked: false,
     createdAt: serverTimestamp(),
   });
+  await setDoc(doc(db, 'documents', ref.id), {
+    classId,
+    groupId: ref.id,
+    textContent: '',
+    htmlContent: '',
+    contentSnapshot: '',
+    wordCount: 0,
+    status: 'WRITING',
+    locked: false,
+    updatedBy: '',
+    version: 1,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
   return ref.id;
 }
 
