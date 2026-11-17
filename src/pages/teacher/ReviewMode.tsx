@@ -6,7 +6,6 @@ import { AnnotationHighlighter } from '@/components/editor/AnnotationHighlighter
 import { AnnotationSidebar } from '@/components/editor/AnnotationSidebar';
 import { WordCounter } from '@/components/editor/WordCounter';
 import { useDocument, useAnnotations } from '@/hooks/useDocument';
-import { useYDoc, useCollaboration } from '@/hooks/useCollaboration';
 import { useAuth } from '@/hooks/useAuth';
 import {
   updateDocument,
@@ -33,13 +32,6 @@ export function ReviewMode() {
   const [commentText, setCommentText] = useState('');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' | 'info' } | null>(null);
 
-  // Yjs document for CRDT sync
-  const ydoc = useYDoc(groupId);
-
-  // RTDB collaboration signaling
-  const classId = document?.classId ?? null;
-  const { synced } = useCollaboration(groupId, classId, ydoc);
-
   // Debounced save to Firestore
   const debouncedSave = debounce(async (text: string, wc: number) => {
     if (!groupId) return;
@@ -53,7 +45,7 @@ export function ReviewMode() {
     } catch (err) {
       console.error('Failed to save:', err);
     }
-  }, 2000);
+  }, 5000);
 
   const handleContentChange = useCallback((text: string) => {
     const wc = text.trim().split(/\s+/).filter(Boolean).length;
@@ -197,12 +189,6 @@ export function ReviewMode() {
                 ← Dashboard
               </Link>
               <h1 className="text-xl font-bold text-slate-900">Review Mode</h1>
-              {synced && (
-                <span className="flex items-center gap-1 text-xs text-green-600">
-                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full" />
-                  Live
-                </span>
-              )}
             </div>
             <div className="flex items-center gap-2">
               {document && <StatusBadge status={document.status} />}
@@ -227,8 +213,8 @@ export function ReviewMode() {
                 <WordCounter count={wordCount} />
               </div>
 
-<CollaborativeEditor
-                ydoc={ydoc}
+              <CollaborativeEditor
+                ydoc={null}
                 content={document?.textContent || ''}
                 onChange={handleContentChange}
                 onSelectText={handleTextSelect}

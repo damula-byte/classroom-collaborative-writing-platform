@@ -6,7 +6,6 @@ import { AnnotationHighlighter } from '@/components/editor/AnnotationHighlighter
 import { AnnotationSidebar } from '@/components/editor/AnnotationSidebar';
 import { WordCounter } from '@/components/editor/WordCounter';
 import { useDocument, useAnnotations } from '@/hooks/useDocument';
-import { useYDoc, useCollaboration } from '@/hooks/useCollaboration';
 import { usePresence } from '@/hooks/usePresence';
 import { useAuth } from '@/hooks/useAuth';
 import { updateDocument, submitDocument } from '@/services';
@@ -22,18 +21,10 @@ export function StudentWorkspace() {
   const [content, setContent] = useState('');
   const [wordCount, setWordCount] = useState(0);
 
-  // Yjs document for CRDT sync
-  const ydoc = useYDoc(groupId);
-
-  // RTDB collaboration signaling
   const classId = document?.classId ?? null;
-  const { synced } = useCollaboration(groupId, classId, ydoc);
-
-  // Real-time presence tracking
   const userName = user?.isAnonymous ? 'Student' : (user?.displayName || 'User');
   usePresence(classId, groupId, user?.uid ?? null, userName);
 
-  // Debounced snapshot persistence to Firestore
   const debouncedSave = debounce(async (text: string, wc: number) => {
     if (!groupId) return;
     try {
@@ -46,9 +37,8 @@ export function StudentWorkspace() {
     } catch (err) {
       console.error('Failed to save snapshot:', err);
     }
-  }, 3000);
+  }, 5000);
 
-  // Update content and word count, trigger debounced save
   const handleContentChange = useCallback((text: string) => {
     setContent(text);
     const wc = text.trim().split(/\s+/).filter(Boolean).length;
@@ -56,7 +46,6 @@ export function StudentWorkspace() {
     debouncedSave(text, wc);
   }, [debouncedSave]);
 
-  // Sync document content when loaded
   useEffect(() => {
     if (document?.textContent) {
       setContent(document.textContent);
@@ -83,7 +72,6 @@ export function StudentWorkspace() {
     }
   };
 
-  // Random color for this student's cursor
   const userColor = '#6366f1';
 
   if (loading) {
@@ -104,12 +92,10 @@ export function StudentWorkspace() {
                 ← Back
               </Button>
               <h1 className="text-xl font-bold text-slate-900">Student Workspace</h1>
-              {synced && (
-                <span className="flex items-center gap-1 text-xs text-green-600">
-                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full" />
-                  Synced
-                </span>
-              )}
+              <span className="flex items-center gap-1 text-xs text-slate-500">
+                <span className="w-1.5 h-1.5 bg-slate-400 rounded-full" />
+                Auto-save 5s
+              </span>
             </div>
             <div className="flex items-center gap-2">
               {document && <StatusBadge status={document.status} />}
@@ -130,23 +116,23 @@ export function StudentWorkspace() {
                 <h2 className="text-xl font-semibold text-slate-900">Collaborative Editor</h2>
                 <WordCounter count={wordCount} />
               </div>
-<CollaborativeEditor
-                 ydoc={ydoc}
-                 content={document?.textContent || ''}
-                 onChange={handleContentChange}
-                 editable={document?.status === 'WRITING'}
-                 user={{ name: userName, color: userColor }}
-               />
+              <CollaborativeEditor
+                ydoc={null}
+                content={document?.textContent || ''}
+                onChange={handleContentChange}
+                editable={document?.status === 'WRITING'}
+                user={{ name: userName, color: userColor }}
+              />
 
-               {annotations.length > 0 && (
-                 <div className="mt-4 border-t border-slate-100 pt-4">
-                   <h4 className="text-sm font-medium text-slate-700 mb-2">Teacher annotations:</h4>
-                   <AnnotationHighlighter
-                     content={document?.textContent || ''}
-                     annotations={annotations}
-                   />
-                 </div>
-               )}
+              {annotations.length > 0 && (
+                <div className="mt-4 border-t border-slate-100 pt-4">
+                  <h4 className="text-sm font-medium text-slate-700 mb-2">Teacher annotations:</h4>
+                  <AnnotationHighlighter
+                    content={document?.textContent || ''}
+                    annotations={annotations}
+                  />
+                </div>
+              )}
             </div>
           </div>
           <div className="lg:col-span-1">
