@@ -124,7 +124,7 @@ export async function registerStudent(data: {
   groupId: string;
   name: string;
 }): Promise<void> {
-  await addDoc(collection(db, `classes/${data.classId}/students`), {
+  await setDoc(doc(db, `classes/${data.classId}/students`, data.uid), {
     ...data,
     joinedAt: serverTimestamp(),
     lastSeenAt: serverTimestamp(),
