@@ -310,11 +310,20 @@ export async function transitionDocumentStatus(
   if (!canTransition(from, to)) {
     throw new Error(`Invalid status transition: ${from} -> ${to}`);
   }
+  const docData = await getDocument(groupId);
+  if (!docData) throw new Error('Document not found');
   await updateDocument(groupId, {
     status: to,
     locked: to === 'LOCKED',
-    version: (await getDoc(doc(db, 'documents', groupId))).data()?.version + 1 || 1,
+    version: docData.version + 1,
   });
+  if (docData.classId) {
+    await updateDoc(doc(db, `classes/${docData.classId}/groups`, groupId), {
+      status: to,
+      locked: to === 'LOCKED',
+      updatedAt: serverTimestamp(),
+    });
+  }
 }
 
 export async function submitDocument(groupId: string): Promise<void> {
