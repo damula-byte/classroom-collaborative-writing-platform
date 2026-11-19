@@ -1,4 +1,4 @@
-﻿interface WordCounterProps {
+interface WordCounterProps {
   count: number;
   target?: number;
   className?: string;
@@ -16,7 +16,7 @@ export function WordCounter({ count, target, className }: WordCounterProps) {
       {target && (
         <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
           <div
-            className="h-full bg-indigo-500 transition-all"
+            className="h-full bg-orange-500 transition-all"
             style={{ width: `${percentage}%` }}
           />
         </div>

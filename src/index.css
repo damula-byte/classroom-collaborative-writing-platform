@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -5,7 +7,82 @@
 @layer base {
   body {
     @apply bg-slate-50 text-slate-900;
+    font-family: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  ::selection {
+    background: #fed7aa;
+    color: #7c2d12;
+  }
+}
+
+@layer components {
+  /* WriteSpace-inspired utility classes with ws- prefix */
+  .ws-field {
+    @apply w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-100;
+  }
+
+  .ws-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-orange-500 px-5 py-3 text-sm font-extrabold text-white shadow-sm transition hover:bg-orange-600 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-55;
+  }
+
+  .ws-btn-green {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-green-600 px-5 py-3 text-sm font-extrabold text-white shadow-sm transition hover:bg-green-700 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-55;
+  }
+
+  .ws-btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-extrabold text-slate-700 transition hover:bg-slate-50 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-55;
+  }
+
+  .ws-modal-backdrop {
+    @apply fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm;
+  }
+
+  .ws-modal-card {
+    @apply w-full max-w-md rounded-3xl bg-white p-7 shadow-2xl;
+  }
+
+  /* Annotation highlight tokens */
+  .ws-highlight {
+    border-radius: 3px;
+    background: #fed7aa;
+    box-shadow: 0 0 0 2px #fed7aa;
+    color: inherit;
+  }
+
+  .ws-highlight[data-color='yellow'] {
+    background: #fde68a;
+    box-shadow: 0 0 0 2px #fde68a;
+  }
+
+  .ws-highlight[data-color='green'] {
+    background: #bbf7d0;
+    box-shadow: 0 0 0 2px #bbf7d0;
+  }
+
+  .ws-highlight[data-color='blue'] {
+    background: #bae6fd;
+    box-shadow: 0 0 0 2px #bae6fd;
+  }
+
+  .ws-highlight[data-color='purple'] {
+    background: #e9d5ff;
+    box-shadow: 0 0 0 2px #e9d5ff;
+  }
+
+  .ws-highlight[data-color='pink'] {
+    background: #fbcfe8;
+    box-shadow: 0 0 0 2px #fbcfe8;
   }
 }
 

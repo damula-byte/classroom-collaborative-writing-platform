@@ -1,4 +1,4 @@
-﻿import { cn } from '@/utils';
+import { cn } from '@/utils';
 import { Annotation } from '@/types';
 
 interface AnnotationSidebarProps {
@@ -43,7 +43,7 @@ export function AnnotationSidebar({
                   e.stopPropagation();
                   onResolve?.(ann.id);
                 }}
-                className="text-xs text-indigo-600 hover:text-indigo-800"
+                className="text-xs font-bold text-orange-600 hover:text-orange-800"
               >
                 Resolve
               </button>

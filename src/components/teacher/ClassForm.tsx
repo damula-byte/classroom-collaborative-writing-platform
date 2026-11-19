@@ -60,7 +60,7 @@ export function ClassForm({ open, onClose, onSubmit }: ClassFormProps) {
             onChange={(e) => setTopic(e.target.value)}
             placeholder="Some people believe technology..."
             rows={3}
-            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+            className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-4 focus:ring-orange-100 focus:border-orange-400 transition bg-white placeholder:text-slate-400 resize-none text-slate-800"
             required
           />
         </div>
@@ -73,7 +73,7 @@ export function ClassForm({ open, onClose, onSubmit }: ClassFormProps) {
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase())}
               maxLength={6}
-              className="flex-1"
+              className="flex-1 font-mono uppercase tracking-widest font-bold"
             />
             <Button type="button" variant="secondary" onClick={handleRegenerate}>
               Regenerate
@@ -83,20 +83,20 @@ export function ClassForm({ open, onClose, onSubmit }: ClassFormProps) {
             Students use this code to join your class
           </p>
         </div>
-        <label className="flex items-center gap-2 cursor-pointer">
+        <label className="flex items-center gap-2.5 cursor-pointer">
           <input
             type="checkbox"
             checked={allowGroupSelection}
             onChange={(e) => setAllowGroupSelection(e.target.checked)}
-            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+            className="rounded-md border-slate-300 text-orange-600 focus:ring-orange-200 h-4 w-4"
           />
-          <span className="text-sm text-slate-700">Allow students to select their own group</span>
+          <span className="text-sm font-medium text-slate-700">Allow students to select their own group</span>
         </label>
         <div className="flex gap-3 pt-2">
           <Button type="button" variant="secondary" onClick={onClose} className="flex-1">
             Cancel
           </Button>
-          <Button type="submit" loading={loading} className="flex-1">
+          <Button type="submit" variant="ws-primary" loading={loading} className="flex-1">
             Create Class
           </Button>
         </div>

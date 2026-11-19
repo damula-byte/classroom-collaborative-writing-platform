@@ -2,7 +2,7 @@ import React, { ReactNode } from 'react';
 import { cn } from '@/utils';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'ws-primary' | 'ws-green';
   size?: 'sm' | 'md' | 'lg';
   loading?: boolean;
   children: ReactNode;
@@ -21,6 +21,9 @@ export function Button({
     secondary: 'bg-white text-slate-700 border-2 border-slate-200 hover:bg-slate-50',
     danger: 'bg-red-600 text-white hover:bg-red-700',
     ghost: 'text-slate-600 hover:bg-slate-100',
+    // WriteSpace-inspired variants
+    'ws-primary': 'bg-orange-500 text-white hover:bg-orange-600 active:scale-[.98] focus:ring-orange-200 font-extrabold shadow-sm rounded-xl',
+    'ws-green': 'bg-green-600 text-white hover:bg-green-700 active:scale-[.98] focus:ring-green-200 font-extrabold shadow-sm rounded-xl',
   };
   const sizes = {
     sm: 'px-3 py-1.5 text-sm',
