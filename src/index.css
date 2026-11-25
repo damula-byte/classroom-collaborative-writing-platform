@@ -6,7 +6,8 @@
 
 @layer base {
   body {
-    @apply bg-slate-50 text-slate-900;
+    background-color: #fbfaf7;
+    @apply text-slate-900;
     font-family: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: "rlig" 1, "calt" 1;
   }

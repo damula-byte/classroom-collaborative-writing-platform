@@ -1,7 +1,15 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, StatusBadge, Modal, Toast } from '@/components/common';
-import { Logo, Avatar, EmptyState } from '@/components/ui';
+import {
+  Logo,
+  Avatar,
+  EmptyState,
+  VoteButton,
+  VoteCount,
+  WinnerBadge,
+  CommentsSidebar,
+} from '@/components/ui';
 import { CollaborativeEditor } from '@/components/editor/CollaborativeEditor';
 import { AnnotationHighlighter } from '@/components/editor/AnnotationHighlighter';
 import { WordCounter } from '@/components/editor/WordCounter';
@@ -10,10 +18,19 @@ import { useClass } from '@/hooks/useClass';
 import { useGroups } from '@/hooks/useGroup';
 import { usePresence } from '@/hooks/usePresence';
 import { useAuth } from '@/hooks/useAuth';
-import { updateDocument, submitDocument } from '@/services';
-import { PresenceEntry } from '@/types';
+import {
+  updateDocument,
+  submitDocument,
+  subscribeToVotes,
+  castVoteAtomic,
+  subscribeToWritingComments,
+  createWritingComment,
+  getDocument,
+  finalizeExpiredTimerIdempotent,
+} from '@/services';
+import { PresenceEntry, Vote, WritingComment, HighlightColor, Document as WritingDoc } from '@/types';
 import { BRANDING } from '@/config/branding';
-import { debounce } from '@/utils';
+import { debounce, calculateWinners, clampVotesPerStudent, sanitizeRichHtml } from '@/utils';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -26,6 +43,9 @@ import {
   ChevronUp,
   Lock,
   Save,
+  Clock3,
+  BookOpen,
+  Users,
 } from 'lucide-react';
 
 export function StudentWorkspace() {
@@ -49,12 +69,54 @@ export function StudentWorkspace() {
   const [isPromptExpanded, setIsPromptExpanded] = useState(true);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [votes, setVotes] = useState<Vote[]>([]);
+  const [votingGroupId, setVotingGroupId] = useState<string | null>(null);
+  const [reviewGroupId, setReviewGroupId] = useState<string | null>(null);
+  const [reviewDoc, setReviewDoc] = useState<WritingDoc | null>(null);
+  const [reviewComments, setReviewComments] = useState<WritingComment[]>([]);
+  const [selectedQuote, setSelectedQuote] = useState<string | null>(null);
+  const [highlightColor, setHighlightColor] = useState<HighlightColor>('orange');
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' | 'info' } | null>(null);
 
   // Student username & presence tracking in RTDB
-  const userName = user?.displayName || (user?.isAnonymous ? 'Student' : 'User');
+  const userName = user?.displayName || localStorage.getItem('studentName') || (user?.isAnonymous ? 'Student' : 'User');
   const userColor = '#16a34a'; // Green accent for student presence
   const peers = usePresence(classId, groupId, user?.uid ?? null, userName);
+
+  // Subscribe to class votes
+  useEffect(() => {
+    if (!classId) return;
+    const unsub = subscribeToVotes(classId, setVotes);
+    return () => unsub();
+  }, [classId]);
+
+  // Synchronized timer ticker
+  useEffect(() => {
+    if (!cls?.timerEndsAt || cls.timerPausedAt) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      setNowTick(now);
+      if (classId && cls.timerEndsAt && now >= cls.timerEndsAt && (!cls.timerFinalizedAt || cls.timerFinalizedAt < cls.timerEndsAt)) {
+        finalizeExpiredTimerIdempotent(classId).catch((err) => {
+          console.error('Timer finalization error:', err);
+        });
+      }
+    }, 500);
+    return () => window.clearInterval(interval);
+  }, [classId, cls?.timerEndsAt, cls?.timerPausedAt, cls?.timerFinalizedAt]);
+
+  // Load peer review document & comments when reviewing another group
+  useEffect(() => {
+    if (!reviewGroupId) {
+      setReviewDoc(null);
+      setReviewComments([]);
+      return;
+    }
+    getDocument(reviewGroupId).then(setReviewDoc).catch(console.error);
+    const unsub = subscribeToWritingComments(reviewGroupId, setReviewComments);
+    return () => unsub();
+  }, [reviewGroupId]);
 
   // Filter online group members
   const peerList = Object.entries(peers || {});
@@ -64,15 +126,74 @@ export function StudentWorkspace() {
   const visibleAvatars = onlinePeers.slice(0, maxVisibleAvatars);
   const remainingCount = onlineCount - maxVisibleAvatars;
 
-  // Debounced auto-save to Firestore (5000ms delay as in original implementation)
+  const timerInfo = useMemo(() => {
+    if (!cls?.timerStartedAt && !cls?.timerEndsAt) return null;
+    if (cls.timerPausedAt) {
+      return { status: 'paused' as const, remaining: Math.max(0, cls.timerRemainingSeconds ?? 0) };
+    }
+    if (cls.timerEndsAt) {
+      const rem = Math.max(0, Math.ceil((cls.timerEndsAt - nowTick) / 1000));
+      return { status: rem <= 0 ? ('expired' as const) : ('running' as const), remaining: rem };
+    }
+    return null;
+  }, [cls, nowTick]);
+
+  const isTimerExpired = timerInfo?.status === 'expired';
+
+  // Peer review & voting derived state
+  const hasSubmittedOwnGroup = useMemo(() => {
+    if (!user?.uid) return false;
+    return groups.some(
+      (g) =>
+        (g.status === 'SUBMITTED' || g.status === 'REVIEWING' || g.status === 'REVIEWED') &&
+        g.members.some((m) => m.uid === user.uid)
+    );
+  }, [groups, user?.uid]);
+
+  const submittedGroups = useMemo(
+    () =>
+      groups.filter(
+        (g) => g.status === 'SUBMITTED' || g.status === 'REVIEWING' || g.status === 'REVIEWED'
+      ),
+    [groups]
+  );
+
+  const votesByGroup = useMemo(() => {
+    const map: Record<string, { count: number; names: string[]; hasVoted: boolean }> = {};
+    for (const v of votes) {
+      if (!map[v.groupId]) map[v.groupId] = { count: 0, names: [], hasVoted: false };
+      map[v.groupId].count += 1;
+      map[v.groupId].names.push(v.voterName);
+      if (user?.uid && v.voterUid === user.uid) {
+        map[v.groupId].hasVoted = true;
+      }
+    }
+    return map;
+  }, [votes, user?.uid]);
+
+  const { winnerIds } = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [gid, info] of Object.entries(votesByGroup)) counts[gid] = info.count;
+    return calculateWinners(groups, counts);
+  }, [groups, votesByGroup]);
+
+  const votesUsed = useMemo(() => {
+    if (!user?.uid) return 0;
+    return votes.filter((v) => v.voterUid === user.uid).length;
+  }, [votes, user?.uid]);
+
+  const maxVotesAllowed = clampVotesPerStudent(cls?.votesPerStudent ?? 1);
+  const remainingVotes = Math.max(0, maxVotesAllowed - votesUsed);
+
+  // Debounced auto-save to Firestore (~450ms WriteSpace target)
   const debouncedSave = useMemo(
     () =>
       debounce(async (text: string, wc: number) => {
-        if (!groupId) return;
+        if (!groupId || isTimerExpired) return;
         setSaveStatus('saving');
         try {
           await updateDocument(groupId, {
-            textContent: text,
+            textContent: sanitizeRichHtml(text),
             wordCount: wc,
             updatedAt: Date.now(),
             updatedBy: user?.uid || '',
@@ -82,8 +203,8 @@ export function StudentWorkspace() {
           console.error('Failed to save snapshot:', err);
           setSaveStatus('error');
         }
-      }, 5000),
-    [groupId, user?.uid]
+      }, 450),
+    [groupId, user?.uid, isTimerExpired]
   );
 
   const handleContentChange = useCallback(
@@ -146,9 +267,54 @@ export function StudentWorkspace() {
     }
   };
 
-  // Check editing permission based strictly on document lifecycle status
-  const isEditable = document?.status === 'WRITING' && !document?.locked;
-  const canSubmit = document?.status === 'WRITING';
+  // Check editing permission based strictly on document lifecycle status & timer
+  const isEditable = document?.status === 'WRITING' && !document?.locked && !isTimerExpired;
+  const canSubmit = document?.status === 'WRITING' && !isTimerExpired;
+
+  const handleVote = async (targetGroupId: string) => {
+    if (!classId || !user?.uid) return;
+    setVotingGroupId(targetGroupId);
+    try {
+      await castVoteAtomic({
+        classId,
+        groupId: targetGroupId,
+        voterUid: user.uid,
+        voterName: userName,
+      });
+      setToast({ message: 'Vote recorded!', type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Could not cast vote', type: 'error' });
+    } finally {
+      setVotingGroupId(null);
+    }
+  };
+
+  const handleReviewTextSelection = () => {
+    const sel = window.getSelection()?.toString().trim() || '';
+    if (!sel) return;
+    if (sel.length > 500) {
+      setToast({ message: 'Please select 500 characters or fewer to highlight.', type: 'warning' });
+      return;
+    }
+    setSelectedQuote(sel);
+  };
+
+  const handleAddReviewComment = async (body: string, parentId?: string | null) => {
+    if (!classId || !reviewGroupId || !user?.uid) return;
+    await createWritingComment({
+      classId,
+      groupId: reviewGroupId,
+      authorId: user.uid,
+      authorName: userName,
+      authorRole: 'student',
+      body,
+      parentId: parentId ?? null,
+      selectedText: parentId ? null : selectedQuote,
+      highlightColor: parentId ? null : selectedQuote ? highlightColor : null,
+      documentRevision: reviewDoc?.version ?? null,
+    });
+    if (!parentId) setSelectedQuote(null);
+  };
 
   if (loading) {
     return (
@@ -206,8 +372,28 @@ export function StudentWorkspace() {
               </div>
             </div>
 
-            {/* Right Header: Presence, Word Count, Save Status, Submit Button */}
+            {/* Right Header: Timer, Presence, Save Status, Submit Button */}
             <div className="flex items-center gap-2.5 sm:gap-4">
+              {timerInfo && (
+                <div
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-mono font-extrabold ${
+                    timerInfo.status === 'expired'
+                      ? 'border-red-200 bg-red-50 text-red-700'
+                      : timerInfo.remaining <= 60 && timerInfo.status === 'running'
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : timerInfo.status === 'paused'
+                      ? 'border-sky-200 bg-sky-50 text-sky-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-800'
+                  }`}
+                >
+                  <Clock3 size={13} />
+                  <span>
+                    {String(Math.floor(timerInfo.remaining / 60)).padStart(2, '0')}:
+                    {String(timerInfo.remaining % 60).padStart(2, '0')}
+                  </span>
+                </div>
+              )}
+
               {/* Online Presence Avatars */}
               {onlineCount > 0 && (
                 <div className="hidden md:flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50/80 py-1 pl-1.5 pr-3 shadow-2xs">
@@ -340,50 +526,130 @@ export function StudentWorkspace() {
             </div>
           )}
 
-          {/* Primary Distraction-Free Writing Card */}
-          <div className="rounded-3xl border border-slate-200/90 bg-white p-6 sm:p-10 shadow-xs space-y-4">
-            {/* Top Editor Bar: Title + Word Counter */}
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-              <h2 className="text-base sm:text-lg font-black tracking-tight text-slate-900">
-                Group Essay Draft
-              </h2>
-              <WordCounter count={wordCount} />
+          {/* Primary Distraction-Free Writing Card (#f1f3f4 workspace + 850px white paper) */}
+          <div className="rounded-3xl bg-[#f1f3f4] p-4 sm:p-8 border border-slate-200/80">
+            <div className="mx-auto max-w-[850px] rounded-3xl border border-slate-200/90 bg-white p-6 sm:p-10 shadow-xs space-y-4">
+              {/* Top Editor Bar: Title + Word Counter */}
+              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                <h2 className="text-base sm:text-lg font-black tracking-tight text-slate-900">
+                  Group Essay Draft
+                </h2>
+                <WordCounter count={wordCount} />
+              </div>
+
+              {/* Collaborative Editor (CRITICAL: ydoc={null} strictly preserved) */}
+              <div className="min-h-[380px] sm:min-h-[460px] text-slate-800 leading-relaxed font-sans">
+                <CollaborativeEditor
+                  ydoc={null}
+                  content={document?.textContent || ''}
+                  onChange={handleContentChange}
+                  editable={isEditable}
+                  user={{ name: userName, color: userColor }}
+                />
+              </div>
+
+              {/* Teacher Annotations Highlighter (Displayed when feedback is available) */}
+              {annotations.length > 0 && (
+                <div className="mt-8 pt-6 border-t border-slate-100 space-y-3">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-orange-600">
+                    <MessageSquare className="h-4 w-4 text-orange-600" />
+                    <span>Teacher Feedback & Annotations ({annotations.length})</span>
+                  </div>
+
+                  <div className="rounded-2xl bg-[#faf9f6] p-4 sm:p-5 border border-slate-200/80 leading-relaxed text-sm text-slate-800">
+                    <AnnotationHighlighter
+                      content={document?.textContent || ''}
+                      annotations={annotations}
+                      onAnnotationClick={(ann) => {
+                        setToast({
+                          message: `Teacher Note: "${ann.comment || ann.selectedText}"`,
+                          type: 'info',
+                        });
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Peer Review & Voting Section */}
+          <section className="rounded-3xl border border-slate-200 bg-white p-6 sm:p-8 shadow-xs space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
+                  <BookOpen size={18} className="text-green-600" />
+                  <span>Submitted Writing & Peer Review</span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Read classmates' submitted essays, leave feedback, and cast your votes.
+                </p>
+              </div>
+              {hasSubmittedOwnGroup && (
+                <span className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-extrabold text-rose-700">
+                  {remainingVotes} / {maxVotesAllowed} votes left
+                </span>
+              )}
             </div>
 
-            {/* Collaborative Editor (CRITICAL: ydoc={null} strictly preserved) */}
-            <div className="min-h-[380px] sm:min-h-[460px] text-slate-800 leading-relaxed font-sans">
-              <CollaborativeEditor
-                ydoc={null}
-                content={document?.textContent || ''}
-                onChange={handleContentChange}
-                editable={isEditable}
-                user={{ name: userName, color: userColor }}
-              />
-            </div>
+            {!hasSubmittedOwnGroup ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center space-y-2">
+                <Lock className="mx-auto h-6 w-6 text-slate-400" />
+                <p className="text-sm font-bold text-slate-700">Peer Review Locked</p>
+                <p className="text-xs text-slate-500">
+                  Submit your group's writing to unlock peer review.
+                </p>
+              </div>
+            ) : submittedGroups.length === 0 ? (
+              <p className="text-xs text-slate-400 italic">No submitted essays in this classroom yet.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {submittedGroups.map((g) => {
+                  const isOwn = g.members.some((m) => m.uid === user?.uid);
+                  const voteInfo = votesByGroup[g.id] ?? { count: 0, names: [], hasVoted: false };
+                  const isWinner = winnerIds.has(g.id);
 
-            {/* Teacher Annotations Highlighter (Displayed when feedback is available) */}
-            {annotations.length > 0 && (
-              <div className="mt-8 pt-6 border-t border-slate-100 space-y-3">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-orange-600">
-                  <MessageSquare className="h-4 w-4 text-orange-600" />
-                  <span>Teacher Feedback & Annotations ({annotations.length})</span>
-                </div>
+                  return (
+                    <div
+                      key={g.id}
+                      className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 flex flex-col justify-between gap-4"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <h3 className="text-sm font-extrabold text-slate-900">{g.name}</h3>
+                            <p className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
+                              <Users size={12} /> {g.members.map((m) => m.name).join(', ') || 'No members'}
+                            </p>
+                          </div>
+                          {isWinner && <WinnerBadge />}
+                        </div>
+                        <VoteCount count={voteInfo.count} voterNames={voteInfo.names} />
+                      </div>
 
-                <div className="rounded-2xl bg-[#faf9f6] p-4 sm:p-5 border border-slate-200/80 leading-relaxed text-sm text-slate-800">
-                  <AnnotationHighlighter
-                    content={document?.textContent || ''}
-                    annotations={annotations}
-                    onAnnotationClick={(ann) => {
-                      setToast({
-                        message: `Teacher Note: "${ann.comment || ann.selectedText}"`,
-                        type: 'info',
-                      });
-                    }}
-                  />
-                </div>
+                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
+                        <button
+                          type="button"
+                          onClick={() => setReviewGroupId(g.id)}
+                          className="ws-btn-secondary py-1.5 px-3 text-xs"
+                        >
+                          <MessageSquare size={13} /> Read & Comment
+                        </button>
+                        <VoteButton
+                          isOwnGroup={isOwn}
+                          hasVoted={voteInfo.hasVoted}
+                          remainingVotes={remainingVotes}
+                          isEligible={hasSubmittedOwnGroup}
+                          loading={votingGroupId === g.id}
+                          onVote={() => handleVote(g.id)}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
-          </div>
+          </section>
         </main>
       </div>
 
@@ -391,9 +657,42 @@ export function StudentWorkspace() {
       <footer className="w-full border-t border-slate-200/60 bg-white py-4 mt-8">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 sm:px-6 text-xs text-slate-400">
           <span>Writing as <strong className="text-slate-700 font-semibold">{userName}</strong></span>
-          <span>Automatic autosave every 5s · {BRANDING.productName}</span>
+          <span>Automatic autosave (~450ms) · {BRANDING.productName}</span>
         </div>
       </footer>
+
+      {/* Peer Review Modal (Read-only essay + 360px CommentsSidebar) */}
+      <Modal
+        open={!!reviewGroupId}
+        onClose={() => {
+          setReviewGroupId(null);
+          setSelectedQuote(null);
+        }}
+        title={groups.find((g) => g.id === reviewGroupId)?.name || 'Peer Review'}
+        size="lg"
+      >
+        <div className="flex flex-col lg:flex-row gap-6 items-start">
+          <div
+            onMouseUp={handleReviewTextSelection}
+            className="flex-1 w-full rounded-2xl border border-slate-200 bg-white p-6 min-h-[300px] max-h-[70vh] overflow-y-auto text-sm text-slate-800 leading-relaxed whitespace-pre-wrap select-text"
+          >
+            {reviewDoc?.textContent ? (
+              reviewDoc.textContent
+            ) : (
+              <span className="text-slate-400 italic">This group has not written any content yet.</span>
+            )}
+          </div>
+          <CommentsSidebar
+            comments={reviewComments}
+            canComment={hasSubmittedOwnGroup}
+            selectedQuote={selectedQuote}
+            highlightColor={highlightColor}
+            onHighlightColorChange={setHighlightColor}
+            onClearSelection={() => setSelectedQuote(null)}
+            onAddComment={handleAddReviewComment}
+          />
+        </div>
+      </Modal>
 
       {/* Submit Confirmation Modal */}
       <Modal

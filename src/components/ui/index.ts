@@ -13,3 +13,7 @@ export { HeroIllustration } from './HeroIllustration';
 export { RoleCard } from './RoleCard';
 export { AuthShell } from './AuthShell';
 export { ClassTimer } from './ClassTimer';
+export { HighlightColorPicker } from './HighlightColorPicker';
+export { VoteButton, VoteCount } from './VoteButton';
+export { WinnerBadge } from './WinnerBadge';
+export { CommentsSidebar } from './CommentsSidebar';

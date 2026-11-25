@@ -41,7 +41,14 @@ service cloud.firestore {
     // ---- Groups ----
     match /classes/{classId}/groups/{groupId} {
       allow read: if isAuthenticated() && isStudentInClass(classId) || isClassTeacher(classId);
-      allow write: if isClassTeacher(classId);
+      allow create, delete: if isClassTeacher(classId);
+      allow update: if isClassTeacher(classId) || (
+        isAuthenticated() &&
+        resource.data.status == 'WRITING' &&
+        resource.data.locked == false &&
+        request.resource.data.classId == resource.data.classId &&
+        request.resource.data.maxMembers == resource.data.maxMembers
+      );
     }
 
     // ---- Students ----
@@ -54,9 +61,11 @@ service cloud.firestore {
 
     // ---- Documents ----
     match /documents/{groupId} {
-      // Teacher can read all; student can ONLY read their own assigned group
+      // Teacher can read all; student can read own group OR submitted peer-review docs in same class
       allow read: if isClassTeacher(resource.data.classId) ||
-        isStudentInGroup(resource.data.classId, groupId);
+        isStudentInGroup(resource.data.classId, groupId) ||
+        (isStudentInClass(resource.data.classId) &&
+         resource.data.status in ['SUBMITTED', 'REVIEWING', 'REVIEWED']);
 
       // Writes allowed only if teacher OR (student in group AND document NOT locked)
       allow write: if isClassTeacher(resource.data.classId) ||
@@ -71,6 +80,46 @@ service cloud.firestore {
         isStudentInGroup(resource.data.classId, resource.data.groupId);
       // Only teacher can create/edit annotations
       allow write: if isClassTeacher(resource.data.classId);
+    }
+
+    // ---- Comments & Highlights (Immutable Peer Review) ----
+    match /comments/{commentId} {
+      allow read: if isClassTeacher(resource.data.classId) ||
+        isStudentInClass(resource.data.classId);
+      allow create: if isAuthenticated() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.body is string &&
+        request.resource.data.body.size() > 0 &&
+        request.resource.data.body.size() <= 2000 &&
+        (request.resource.data.selectedText == null ||
+         (request.resource.data.selectedText is string && request.resource.data.selectedText.size() <= 500)) &&
+        (
+          (request.resource.data.authorRole == 'teacher' && isClassTeacher(request.resource.data.classId)) ||
+          (request.resource.data.authorRole == 'student' && isStudentInClass(request.resource.data.classId))
+        );
+      allow update, delete: if false;
+    }
+
+    // ---- Votes (Atomic & Immutable) ----
+    match /classes/{classId}/votes/{voteId} {
+      allow read: if isClassTeacher(classId) || isStudentInClass(classId);
+      allow create: if isStudentInClass(classId) &&
+        request.resource.data.voterUid == request.auth.uid &&
+        voteId == (request.auth.uid + '_' + request.resource.data.groupId) &&
+        exists(/databases/$(database)/documents/classes/$(classId)/groups/$(request.resource.data.groupId)) &&
+        get(/databases/$(database)/documents/classes/$(classId)/groups/$(request.resource.data.groupId)).data.status in ['SUBMITTED', 'REVIEWING', 'REVIEWED'];
+      allow update, delete: if false;
+    }
+
+    // ---- Voter Quotas ----
+    match /classes/{classId}/voterQuotas/{voterUid} {
+      allow read: if isClassTeacher(classId) || (isAuthenticated() && request.auth.uid == voterUid);
+      allow create, update: if isStudentInClass(classId) &&
+        request.auth.uid == voterUid &&
+        request.resource.data.count is int &&
+        request.resource.data.count >= 1 &&
+        request.resource.data.count <= get(/databases/$(database)/documents/classes/$(classId)).data.votesPerStudent;
+      allow delete: if isClassTeacher(classId);
     }
   }
 }

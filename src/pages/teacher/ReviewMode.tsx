@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { Button, StatusBadge, Modal, Toast } from '@/components/common';
-import { AppHeader } from '@/components/ui';
+import { AppHeader, CommentsSidebar } from '@/components/ui';
 import { CollaborativeEditor } from '@/components/editor/CollaborativeEditor';
 import { AnnotationHighlighter } from '@/components/editor/AnnotationHighlighter';
 import { WordCounter } from '@/components/editor/WordCounter';
@@ -18,7 +18,11 @@ import {
   createAnnotation,
   resolveAnnotation,
   deleteAnnotation,
+  subscribeToWritingComments,
+  createWritingComment,
+  returnToStudents,
 } from '@/services';
+import { WritingComment, HighlightColor } from '@/types';
 import { BRANDING } from '@/config/branding';
 import { debounce } from '@/utils';
 import {
@@ -57,7 +61,45 @@ export function ReviewMode() {
   const [selectedText, setSelectedText] = useState('');
   const [commentText, setCommentText] = useState('');
   const [filter, setFilter] = useState<'all' | 'unresolved' | 'resolved'>('all');
+  const [wsComments, setWsComments] = useState<WritingComment[]>([]);
+  const [wsSelectedQuote, setWsSelectedQuote] = useState<string | null>(null);
+  const [wsHighlightColor, setWsHighlightColor] = useState<HighlightColor>('orange');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' | 'info' } | null>(null);
+
+  useEffect(() => {
+    if (!groupId) return;
+    const unsub = subscribeToWritingComments(groupId, setWsComments);
+    return () => unsub();
+  }, [groupId]);
+
+  const handleReturnToStudents = async () => {
+    const resolvedClassId = classId || document?.classId;
+    if (!resolvedClassId || !groupId) return;
+    try {
+      await returnToStudents(resolvedClassId, groupId);
+      setToast({ message: 'Writing returned to students for revision.', type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to return writing', type: 'error' });
+    }
+  };
+
+  const handleAddWsComment = async (body: string, parentId?: string | null) => {
+    const resolvedClassId = classId || document?.classId;
+    if (!resolvedClassId || !groupId || !user?.uid) return;
+    await createWritingComment({
+      classId: resolvedClassId,
+      groupId,
+      authorId: user.uid,
+      authorName: teacherName,
+      authorRole: 'teacher',
+      body,
+      parentId: parentId ?? null,
+      selectedText: parentId ? null : wsSelectedQuote,
+      highlightColor: parentId ? null : wsSelectedQuote ? wsHighlightColor : null,
+      documentRevision: document?.version ?? null,
+    });
+    if (!parentId) setWsSelectedQuote(null);
+  };
 
   // Debounced save to Firestore (preserves existing 5000ms debounce)
   const debouncedSave = useMemo(
@@ -611,7 +653,28 @@ export function ReviewMode() {
                   <MessageSquare className="h-3.5 w-3.5" />
                   <span>Attach New Feedback</span>
                 </Button>
+
+                {document && document.status !== 'WRITING' && (
+                  <button
+                    type="button"
+                    onClick={handleReturnToStudents}
+                    className="w-full mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-100 transition"
+                  >
+                    Return to students
+                  </button>
+                )}
               </div>
+
+              {/* WriteSpace 360px Comments & Replies Sidebar */}
+              <CommentsSidebar
+                comments={wsComments}
+                canComment={true}
+                selectedQuote={wsSelectedQuote}
+                highlightColor={wsHighlightColor}
+                onHighlightColorChange={setWsHighlightColor}
+                onClearSelection={() => setWsSelectedQuote(null)}
+                onAddComment={handleAddWsComment}
+              />
             </div>
           </div>
         </main>

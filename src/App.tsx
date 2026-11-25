@@ -9,6 +9,7 @@ import { LiveMonitoring } from '@/pages/teacher/LiveMonitoring';
 import { ReviewMode } from '@/pages/teacher/ReviewMode';
 import { StudentJoin } from '@/pages/student/StudentJoin';
 import { StudentWorkspace } from '@/pages/student/StudentWorkspace';
+import { NotFound } from '@/pages/NotFound';
 import { Logo, HeroIllustration, RoleCard } from '@/components/ui';
 import { BRANDING } from '@/config/branding';
 
@@ -152,6 +153,7 @@ export const App: React.FC = () => {
         <Route path="/teacher/classes/:classId" element={<ClassDetail />} />
         <Route path="/teacher/classes/:classId/monitor" element={<LiveMonitoring />} />
         <Route path="/teacher/classes/:classId/groups/:groupId/review" element={<ReviewMode />} />
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </Router>
   );

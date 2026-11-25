@@ -1,15 +1,32 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { Button, StatusBadge, Modal, Input, Toast } from '@/components/common';
-import { AppHeader, EmptyState, ClassTimer } from '@/components/ui';
+import { AppHeader, EmptyState, VoteCount, WinnerBadge } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { useClass } from '@/hooks/useClass';
 import { useGroups } from '@/hooks/useGroup';
-import { createGroup, getStudentCount } from '@/services';
+import {
+  createWriteSpaceGroup,
+  getStudentCount,
+  updateClass,
+  updateGroupCapacity,
+  removeGroupMember,
+  returnToStudents,
+  deleteGroupSafely,
+  subscribeToVotes,
+  startClassTimer,
+  pauseClassTimer,
+  resumeClassTimer,
+  resetClassTimer,
+  finalizeExpiredTimerIdempotent,
+} from '@/services';
+import { Vote } from '@/types';
 import { BRANDING } from '@/config/branding';
+import { calculateWinners, clampVotesPerStudent, clampMaxMembers } from '@/utils';
 import {
   Users,
   Plus,
+  Minus,
   Copy,
   Check,
   Eye,
@@ -17,16 +34,26 @@ import {
   ArrowLeft,
   Sparkles,
   BookOpen,
+  Trash2,
+  UserMinus,
+  Undo2,
+  Play,
+  Pause,
+  RotateCcw,
+  Clock3,
+  Heart,
 } from 'lucide-react';
 
 interface GroupFormProps {
   open: boolean;
   onClose: () => void;
-  onSubmit: (name: string) => Promise<void>;
+  onSubmit: (data: { name: string; prompt: string; maxMembers: number }) => Promise<void>;
 }
 
 function GroupForm({ open, onClose, onSubmit }: GroupFormProps) {
   const [name, setName] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [maxMembers, setMaxMembers] = useState(4);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -34,18 +61,22 @@ function GroupForm({ open, onClose, onSubmit }: GroupFormProps) {
     if (!name.trim()) return;
     setLoading(true);
     try {
-      await onSubmit(name.trim());
+      await onSubmit({
+        name: name.trim(),
+        prompt: prompt.trim(),
+        maxMembers: clampMaxMembers(maxMembers),
+      });
       setName('');
+      setPrompt('');
+      setMaxMembers(4);
       onClose();
-    } catch (err) {
-      // handled by parent
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="Add Writing Group" size="sm">
+    <Modal open={open} onClose={onClose} title="Create Writing Group" size="sm">
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input
           label="Group Name"
@@ -55,9 +86,47 @@ function GroupForm({ open, onClose, onSubmit }: GroupFormProps) {
           required
           disabled={loading}
         />
-        <p className="text-xs text-slate-400">
-          Students can choose or be assigned to this collaborative writing group.
-        </p>
+        <div>
+          <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+            Writing Prompt (Optional)
+          </label>
+          <textarea
+            rows={3}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Specific prompt or instructions for this group..."
+            className="ws-field resize-none text-sm"
+            disabled={loading}
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+            Maximum Members (1–20)
+          </label>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setMaxMembers((v) => clampMaxMembers(v - 1))}
+              disabled={loading || maxMembers <= 1}
+              className="ws-btn-secondary px-3 py-2"
+              aria-label="Decrease max members"
+            >
+              <Minus size={14} />
+            </button>
+            <span className="w-10 text-center text-base font-extrabold text-slate-900">
+              {maxMembers}
+            </span>
+            <button
+              type="button"
+              onClick={() => setMaxMembers((v) => clampMaxMembers(v + 1))}
+              disabled={loading || maxMembers >= 20}
+              className="ws-btn-secondary px-3 py-2"
+              aria-label="Increase max members"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+        </div>
         <div className="flex gap-3 pt-2">
           <Button
             type="button"
@@ -90,17 +159,85 @@ export function ClassDetail() {
   const { groups, loading: groupsLoading } = useGroups(classId || null);
 
   const [studentCount, setStudentCount] = useState<number>(0);
+  const [votes, setVotes] = useState<Vote[]>([]);
   const [showAddGroup, setShowAddGroup] = useState(false);
+  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<{ id: string; name: string } | null>(null);
+  const [confirmRemoveMember, setConfirmRemoveMember] = useState<{
+    groupId: string;
+    uid: string;
+    name: string;
+  } | null>(null);
+  const [timerMinutesInput, setTimerMinutesInput] = useState(15);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [copiedCode, setCopiedCode] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Fetch actual student count from Firestore
+  // Fetch actual student count & subscribe to votes
   useEffect(() => {
     if (!classId) return;
     getStudentCount(classId).then((count) => {
       setStudentCount(count);
     });
+    const unsubVotes = subscribeToVotes(classId, setVotes);
+    return () => unsubVotes();
   }, [classId]);
+
+  // Synchronized timer ticker + idempotent expiration reconciliation
+  useEffect(() => {
+    if (!cls?.timerEndsAt || cls.timerPausedAt) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      setNowTick(now);
+      if (classId && cls.timerEndsAt && now >= cls.timerEndsAt && (!cls.timerFinalizedAt || cls.timerFinalizedAt < cls.timerEndsAt)) {
+        finalizeExpiredTimerIdempotent(classId).catch((err) => {
+          console.error('Timer finalization error:', err);
+        });
+      }
+    }, 500);
+    return () => window.clearInterval(interval);
+  }, [classId, cls?.timerEndsAt, cls?.timerPausedAt, cls?.timerFinalizedAt]);
+
+  const votesByGroup = useMemo(() => {
+    const map: Record<string, { count: number; names: string[] }> = {};
+    for (const v of votes) {
+      if (!map[v.groupId]) map[v.groupId] = { count: 0, names: [] };
+      map[v.groupId].count += 1;
+      map[v.groupId].names.push(v.voterName);
+    }
+    return map;
+  }, [votes]);
+
+  const { winnerIds } = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const [gid, info] of Object.entries(votesByGroup)) {
+      counts[gid] = info.count;
+    }
+    return calculateWinners(groups, counts);
+  }, [groups, votesByGroup]);
+
+  const timerState = useMemo(() => {
+    const configured = cls?.timerDurationSeconds ?? timerMinutesInput * 60;
+    if (!cls?.timerStartedAt && !cls?.timerEndsAt) {
+      return { status: 'idle' as const, remaining: configured };
+    }
+    if (cls?.timerPausedAt) {
+      return {
+        status: 'paused' as const,
+        remaining: Math.max(0, cls.timerRemainingSeconds ?? configured),
+      };
+    }
+    if (cls?.timerEndsAt) {
+      const rem = Math.max(0, Math.ceil((cls.timerEndsAt - nowTick) / 1000));
+      return { status: rem <= 0 ? ('expired' as const) : ('running' as const), remaining: rem };
+    }
+    return { status: 'idle' as const, remaining: configured };
+  }, [cls, nowTick, timerMinutesInput]);
+
+  const formattedTimer = useMemo(() => {
+    const m = Math.floor(timerState.remaining / 60);
+    const s = timerState.remaining % 60;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }, [timerState.remaining]);
 
   const handleCopyCode = () => {
     if (!cls?.code) return;
@@ -109,13 +246,64 @@ export function ClassDetail() {
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  const handleAddGroup = async (name: string) => {
+  const handleAddGroup = async (data: { name: string; prompt: string; maxMembers: number }) => {
     if (!classId) return;
     try {
-      await createGroup(classId, name);
-      setToast({ message: `Group "${name}" created successfully!`, type: 'success' });
+      await createWriteSpaceGroup(classId, data);
+      setToast({ message: `Group "${data.name}" created successfully!`, type: 'success' });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to create group', type: 'error' });
+    }
+  };
+
+  const handleVotesPerStudentChange = async (next: number) => {
+    if (!classId) return;
+    const clamped = clampVotesPerStudent(next);
+    try {
+      await updateClass(classId, { votesPerStudent: clamped });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to update vote limit', type: 'error' });
+    }
+  };
+
+  const handleCapacityChange = async (groupId: string, next: number) => {
+    if (!classId) return;
+    try {
+      await updateGroupCapacity(classId, groupId, next);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to update capacity', type: 'error' });
+    }
+  };
+
+  const handleReturnGroup = async (groupId: string) => {
+    if (!classId) return;
+    try {
+      await returnToStudents(classId, groupId);
+      setToast({ message: 'Writing returned to students for revision.', type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to return writing', type: 'error' });
+    }
+  };
+
+  const handleConfirmDeleteGroup = async () => {
+    if (!classId || !confirmDeleteGroup) return;
+    try {
+      await deleteGroupSafely(classId, confirmDeleteGroup.id);
+      setToast({ message: `Deleted group "${confirmDeleteGroup.name}".`, type: 'success' });
+      setConfirmDeleteGroup(null);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to delete group', type: 'error' });
+    }
+  };
+
+  const handleConfirmRemoveMember = async () => {
+    if (!classId || !confirmRemoveMember) return;
+    try {
+      await removeGroupMember(classId, confirmRemoveMember.groupId, confirmRemoveMember.uid);
+      setToast({ message: `Removed ${confirmRemoveMember.name} from group.`, type: 'success' });
+      setConfirmRemoveMember(null);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to remove member', type: 'error' });
     }
   };
 
@@ -305,11 +493,15 @@ export function ClassDetail() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   {groups.map((group, index) => {
                     const isOrange = index % 2 === 0;
+                    const maxMembers = group.maxMembers ?? 4;
+                    const voteInfo = votesByGroup[group.id] ?? { count: 0, names: [] };
+                    const isWinner = winnerIds.has(group.id);
+                    const isSubmitted = group.status !== 'WRITING';
 
                     return (
                       <div
                         key={group.id}
-                        className="group relative flex flex-col justify-between rounded-3xl border border-slate-200 bg-white p-6 shadow-xs transition duration-200 hover:-translate-y-1 hover:border-slate-300 hover:shadow-xl overflow-hidden"
+                        className="group relative flex flex-col justify-between rounded-3xl border border-slate-200 bg-white p-6 shadow-xs transition duration-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-xl overflow-hidden"
                       >
                         {/* Top accent line */}
                         <div
@@ -320,9 +512,9 @@ export function ClassDetail() {
 
                         <div>
                           <div className="flex items-start justify-between gap-2 mb-3">
-                            <div className="flex items-center gap-2.5">
+                            <div className="flex items-center gap-2.5 min-w-0">
                               <div
-                                className={`flex h-9 w-9 items-center justify-center rounded-xl text-xs font-bold ${
+                                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-xs font-bold ${
                                   isOrange
                                     ? 'bg-orange-100 text-orange-700'
                                     : 'bg-green-100 text-green-700'
@@ -330,27 +522,93 @@ export function ClassDetail() {
                               >
                                 {group.name.slice(0, 2).toUpperCase()}
                               </div>
-                              <h3 className="text-base font-bold text-slate-900 group-hover:text-orange-600 transition">
-                                {group.name}
-                              </h3>
+                              <div className="min-w-0">
+                                <h3 className="text-base font-bold text-slate-900 truncate">
+                                  {group.name}
+                                </h3>
+                                <p className="text-[11px] font-semibold text-slate-400">
+                                  {group.members.length} / {maxMembers} members
+                                </p>
+                              </div>
                             </div>
-                            <StatusBadge status={group.status} />
+                            <div className="flex flex-col items-end gap-1 shrink-0">
+                              <StatusBadge status={group.status} />
+                              {isWinner && <WinnerBadge />}
+                            </div>
                           </div>
 
-                          <div className="flex items-center gap-2 text-xs text-slate-500 mb-5">
-                            <Users className="h-3.5 w-3.5 text-slate-400" />
-                            <span>
-                              {group.members.length} student
-                              {group.members.length === 1 ? '' : 's'} assigned
-                            </span>
+                          {group.prompt && (
+                            <p className="mb-3 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600 line-clamp-2 border border-slate-100">
+                              {group.prompt}
+                            </p>
+                          )}
+
+                          {/* Members list with remove action */}
+                          <div className="mb-4 space-y-1.5">
+                            {group.members.length === 0 ? (
+                              <p className="text-xs italic text-slate-400">No students joined yet</p>
+                            ) : (
+                              <div className="flex flex-wrap gap-1.5">
+                                {group.members.map((m) => (
+                                  <span
+                                    key={m.uid}
+                                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-semibold text-slate-700"
+                                  >
+                                    <span>{m.name}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setConfirmRemoveMember({
+                                          groupId: group.id,
+                                          uid: m.uid,
+                                          name: m.name,
+                                        })
+                                      }
+                                      className="text-slate-400 hover:text-red-600 transition"
+                                      title={`Remove ${m.name}`}
+                                      aria-label={`Remove ${m.name}`}
+                                    >
+                                      <UserMinus size={12} />
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Capacity + Votes row */}
+                          <div className="flex items-center justify-between gap-2 mb-4">
+                            <div className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-bold text-slate-600">
+                              <span className="text-[11px] text-slate-400">Cap:</span>
+                              <button
+                                type="button"
+                                disabled={maxMembers <= Math.max(1, group.members.length)}
+                                onClick={() => handleCapacityChange(group.id, maxMembers - 1)}
+                                className="rounded p-0.5 hover:bg-slate-200 disabled:opacity-40"
+                                aria-label="Decrease capacity"
+                              >
+                                <Minus size={12} />
+                              </button>
+                              <span className="w-4 text-center">{maxMembers}</span>
+                              <button
+                                type="button"
+                                disabled={maxMembers >= 20}
+                                onClick={() => handleCapacityChange(group.id, maxMembers + 1)}
+                                className="rounded p-0.5 hover:bg-slate-200 disabled:opacity-40"
+                                aria-label="Increase capacity"
+                              >
+                                <Plus size={12} />
+                              </button>
+                            </div>
+                            <VoteCount count={voteInfo.count} voterNames={voteInfo.names} />
                           </div>
                         </div>
 
                         {/* Action buttons */}
-                        <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
+                        <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-100">
                           <Link
                             to={`/teacher/classes/${classId}/monitor`}
-                            className="flex-1"
+                            className="flex-1 min-w-[70px]"
                           >
                             <Button
                               size="sm"
@@ -364,7 +622,7 @@ export function ClassDetail() {
 
                           <Link
                             to={`/teacher/classes/${classId}/groups/${group.id}/review`}
-                            className="flex-1"
+                            className="flex-1 min-w-[80px]"
                           >
                             <Button
                               size="sm"
@@ -375,6 +633,28 @@ export function ClassDetail() {
                               <span>Review</span>
                             </Button>
                           </Link>
+
+                          {isSubmitted && (
+                            <button
+                              type="button"
+                              onClick={() => handleReturnGroup(group.id)}
+                              title="Return to students"
+                              aria-label="Return to students"
+                              className="rounded-xl border border-amber-200 bg-amber-50 p-2 text-amber-700 hover:bg-amber-100 transition"
+                            >
+                              <Undo2 size={14} />
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteGroup({ id: group.id, name: group.name })}
+                            title="Delete group"
+                            aria-label="Delete group"
+                            className="rounded-xl border border-red-200 bg-red-50 p-2 text-red-600 hover:bg-red-100 transition"
+                          >
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </div>
                     );
@@ -383,19 +663,144 @@ export function ClassDetail() {
               )}
             </div>
 
-            {/* Right Column: Interactive Local Timer (WriteSpace experience) */}
+            {/* Right Column: Synchronized Timer + Voting Config */}
             <div className="space-y-6">
               <div>
                 <h2 className="text-xl font-bold tracking-tight text-slate-900">
-                  Session Timer
+                  Synchronized Timer
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Local countdown for active writing exercises
+                  Shared countdown synced across all student screens
                 </p>
               </div>
 
-              {/* ClassTimer component (Phase 6A local state) */}
-              <ClassTimer initialMinutes={15} />
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xs space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500">
+                    <Clock3 size={14} className="text-orange-500" /> Writing Timer
+                  </span>
+                  <span
+                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-extrabold uppercase ${
+                      timerState.status === 'running'
+                        ? 'bg-orange-100 text-orange-800'
+                        : timerState.status === 'paused'
+                        ? 'bg-sky-100 text-sky-800'
+                        : timerState.status === 'expired'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {timerState.status}
+                  </span>
+                </div>
+
+                <div
+                  className={`text-center font-mono text-4xl font-black tracking-tight py-3 rounded-2xl border ${
+                    timerState.status === 'expired'
+                      ? 'border-red-200 bg-red-50 text-red-700'
+                      : timerState.status === 'running' && timerState.remaining <= 60
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : 'border-slate-100 bg-slate-50 text-slate-900'
+                  }`}
+                >
+                  {formattedTimer}
+                </div>
+
+                {timerState.status === 'idle' && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {[5, 10, 15, 25, 45].map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setTimerMinutesInput(m)}
+                        className={`rounded-xl px-2.5 py-1 text-xs font-bold border transition ${
+                          timerMinutesInput === m
+                            ? 'border-orange-500 bg-orange-50 text-orange-700'
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        {m}m
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2">
+                  {timerState.status === 'idle' && (
+                    <button
+                      type="button"
+                      onClick={() => classId && startClassTimer(classId, timerMinutesInput * 60)}
+                      className="ws-btn-primary flex-1 py-2.5 text-xs"
+                    >
+                      <Play size={14} /> Start
+                    </button>
+                  )}
+                  {timerState.status === 'running' && (
+                    <button
+                      type="button"
+                      onClick={() => classId && pauseClassTimer(classId, timerState.remaining)}
+                      className="ws-btn-secondary flex-1 py-2.5 text-xs"
+                    >
+                      <Pause size={14} /> Pause
+                    </button>
+                  )}
+                  {timerState.status === 'paused' && (
+                    <button
+                      type="button"
+                      onClick={() => classId && resumeClassTimer(classId, timerState.remaining)}
+                      className="ws-btn-primary flex-1 py-2.5 text-xs"
+                    >
+                      <Play size={14} /> Resume
+                    </button>
+                  )}
+                  {timerState.status !== 'idle' && (
+                    <button
+                      type="button"
+                      onClick={() => classId && resetClassTimer(classId, timerMinutesInput * 60)}
+                      className="ws-btn-secondary py-2.5 px-3 text-xs"
+                      aria-label="Reset timer"
+                    >
+                      <RotateCcw size={14} /> Reset
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Votes per student configuration */}
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500">
+                    <Heart size={14} className="text-rose-500" /> Votes per student
+                  </span>
+                  <span className="text-xs font-semibold text-slate-400">1–20</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    disabled={(cls?.votesPerStudent ?? 1) <= 1}
+                    onClick={() => handleVotesPerStudentChange((cls?.votesPerStudent ?? 1) - 1)}
+                    className="ws-btn-secondary px-3 py-2"
+                    aria-label="Decrease votes per student"
+                  >
+                    <Minus size={14} />
+                  </button>
+                  <span className="text-2xl font-black text-slate-900">
+                    {cls?.votesPerStudent ?? 1}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={(cls?.votesPerStudent ?? 1) >= 20}
+                    onClick={() => handleVotesPerStudentChange((cls?.votesPerStudent ?? 1) + 1)}
+                    className="ws-btn-secondary px-3 py-2"
+                    aria-label="Increase votes per student"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Students who have submitted their writing can vote for up to {cls?.votesPerStudent ?? 1} other group(s).
+                </p>
+              </div>
 
               {/* Tips panel */}
               <div className="rounded-3xl border border-slate-200 bg-white/70 p-5 text-xs text-slate-500 space-y-2">
@@ -404,7 +809,7 @@ export function ClassDetail() {
                   <span>Teacher Tip</span>
                 </div>
                 <p className="leading-relaxed">
-                  Use the countdown to keep classroom sprints on schedule. This timer runs locally in your browser and will alert you visually when time runs out.
+                  When the timer expires, student editors lock automatically and open groups finalize to Submitted.
                 </p>
               </div>
             </div>
@@ -418,6 +823,50 @@ export function ClassDetail() {
         onClose={() => setShowAddGroup(false)}
         onSubmit={handleAddGroup}
       />
+
+      {/* Delete Group Confirmation Modal */}
+      <Modal
+        open={!!confirmDeleteGroup}
+        onClose={() => setConfirmDeleteGroup(null)}
+        title="Delete Writing Group?"
+        size="sm"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Are you sure you want to delete <strong>{confirmDeleteGroup?.name}</strong>? This will remove the group and its writing document.
+          </p>
+          <div className="flex gap-3">
+            <Button variant="secondary" onClick={() => setConfirmDeleteGroup(null)} className="flex-1">
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleConfirmDeleteGroup} className="flex-1">
+              Delete Group
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Remove Member Confirmation Modal */}
+      <Modal
+        open={!!confirmRemoveMember}
+        onClose={() => setConfirmRemoveMember(null)}
+        title="Remove Student?"
+        size="sm"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Remove <strong>{confirmRemoveMember?.name}</strong> from this group? Their writing contributions will remain, but they will lose edit access.
+          </p>
+          <div className="flex gap-3">
+            <Button variant="secondary" onClick={() => setConfirmRemoveMember(null)} className="flex-1">
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleConfirmRemoveMember} className="flex-1">
+              Remove
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Toast notifications */}
       {toast && (
