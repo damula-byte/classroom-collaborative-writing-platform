@@ -27,8 +27,31 @@ import {
   createWritingComment,
   getDocument,
   finalizeExpiredTimerIdempotent,
+  updateWritingComment,
+  deleteWritingReply,
+  softDeleteWritingComment,
+  subscribeToActivePeerReviewChecklist,
+  createOrGetPeerReviewDraft,
+  subscribeToPeerReviewDraft,
+  subscribeToPeerReviewPublished,
+  subscribeToPeerReviewResponses,
+  setPeerReviewCriterion,
+  updatePeerReviewOverallFeedback,
+  submitPeerReview,
+  savePublishedPeerReviewChanges,
+  subscribeToPublishedReviewsForTarget,
 } from '@/services';
-import { PresenceEntry, Vote, WritingComment, HighlightColor, Document as WritingDoc } from '@/types';
+import {
+  PresenceEntry,
+  Vote,
+  WritingComment,
+  HighlightColor,
+  Document as WritingDoc,
+  ChecklistVersion,
+  PeerReviewDraft,
+  PeerReviewPublished,
+  ChecklistResponse,
+} from '@/types';
 import { BRANDING } from '@/config/branding';
 import { debounce, calculateWinners, clampVotesPerStudent, sanitizeRichHtml } from '@/utils';
 import {
@@ -64,6 +87,7 @@ export function StudentWorkspace() {
   const currentGroup = groups.find((g) => g.id === groupId);
 
   const [content, setContent] = useState('');
+  const [htmlContent, setHtmlContent] = useState('');
   const [wordCount, setWordCount] = useState(0);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
   const [isPromptExpanded, setIsPromptExpanded] = useState(true);
@@ -76,6 +100,13 @@ export function StudentWorkspace() {
   const [reviewComments, setReviewComments] = useState<WritingComment[]>([]);
   const [selectedQuote, setSelectedQuote] = useState<string | null>(null);
   const [highlightColor, setHighlightColor] = useState<HighlightColor>('orange');
+  const [activeChecklist, setActiveChecklist] = useState<ChecklistVersion | null>(null);
+  const [peerDraft, setPeerDraft] = useState<PeerReviewDraft | null>(null);
+  const [publishedReview, setPublishedReview] = useState<PeerReviewPublished | null>(null);
+  const [peerResponses, setPeerResponses] = useState<ChecklistResponse[]>([]);
+  const [receivedReviews, setReceivedReviews] = useState<PeerReviewPublished[]>([]);
+  const [receivedResponseCounts, setReceivedResponseCounts] = useState<Record<string, { checked: number; total: number }>>({});
+  const [peerReviewTab, setPeerReviewTab] = useState<'checklist' | 'comments'>('checklist');
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' | 'info' } | null>(null);
 
@@ -117,6 +148,83 @@ export function StudentWorkspace() {
     const unsub = subscribeToWritingComments(reviewGroupId, setReviewComments);
     return () => unsub();
   }, [reviewGroupId]);
+
+  useEffect(() => {
+    if (!classId || !groupId || !reviewGroupId || !user?.uid) {
+      setActiveChecklist(null);
+      setPeerDraft(null);
+      setPublishedReview(null);
+      setPeerResponses([]);
+      return;
+    }
+
+    const pairId = `${groupId}__${reviewGroupId}`;
+    const unsubChecklist = subscribeToActivePeerReviewChecklist(classId, setActiveChecklist);
+    createOrGetPeerReviewDraft({
+      classId,
+      reviewerGroupId: groupId,
+      targetGroupId: reviewGroupId,
+      uid: user.uid,
+    }).catch(() => {
+      setPeerDraft(null);
+    });
+    const unsubDraft = subscribeToPeerReviewDraft(
+      classId,
+      groupId,
+      reviewGroupId,
+      setPeerDraft
+    );
+    const unsubPublished = subscribeToPeerReviewPublished(
+      classId,
+      groupId,
+      reviewGroupId,
+      setPublishedReview
+    );
+    const unsubResponses = subscribeToPeerReviewResponses(
+      classId,
+      pairId,
+      'draft',
+      setPeerResponses
+    );
+
+    return () => {
+      unsubChecklist();
+      unsubDraft();
+      unsubPublished();
+      unsubResponses();
+    };
+  }, [classId, groupId, reviewGroupId, user?.uid]);
+
+  useEffect(() => {
+    if (!classId || !groupId) {
+      setReceivedReviews([]);
+      return;
+    }
+    return subscribeToPublishedReviewsForTarget(classId, groupId, setReceivedReviews);
+  }, [classId, groupId]);
+
+  useEffect(() => {
+    if (!classId || receivedReviews.length === 0) {
+      setReceivedResponseCounts({});
+      return;
+    }
+    const unsubscribers = receivedReviews.map((review) =>
+      subscribeToPeerReviewResponses(
+        classId,
+        review.id,
+        'published',
+        (responses) =>
+          setReceivedResponseCounts((counts) => ({
+            ...counts,
+            [review.id]: {
+              checked: responses.filter((response) => response.checked).length,
+              total: responses.length,
+            },
+          }))
+      )
+    );
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [classId, receivedReviews]);
 
   // Filter online group members
   const peerList = Object.entries(peers || {});
@@ -188,12 +296,13 @@ export function StudentWorkspace() {
   // Debounced auto-save to Firestore (~450ms WriteSpace target)
   const debouncedSave = useMemo(
     () =>
-      debounce(async (text: string, wc: number) => {
+      debounce(async (text: string, html: string, wc: number) => {
         if (!groupId || isTimerExpired) return;
         setSaveStatus('saving');
         try {
           await updateDocument(groupId, {
             textContent: sanitizeRichHtml(text),
+            htmlContent: sanitizeRichHtml(html),
             wordCount: wc,
             updatedAt: Date.now(),
             updatedBy: user?.uid || '',
@@ -213,7 +322,20 @@ export function StudentWorkspace() {
       const wc = text.trim().split(/\s+/).filter(Boolean).length;
       setWordCount(wc);
       setSaveStatus('saving');
-      debouncedSave(text, wc);
+    },
+    [debouncedSave]
+  );
+
+  const handleHtmlChange = useCallback(
+    (html: string) => {
+      setHtmlContent(html);
+      const element = window.document.createElement('div');
+      element.innerHTML = html;
+      const text = element.textContent || '';
+      setContent(text);
+      const wc = text.trim().split(/\s+/).filter(Boolean).length;
+      setWordCount(wc);
+      debouncedSave(text, html, wc);
     },
     [debouncedSave]
   );
@@ -222,6 +344,7 @@ export function StudentWorkspace() {
   useEffect(() => {
     if (document?.textContent && !content) {
       setContent(document.textContent);
+      setHtmlContent(document.htmlContent || document.textContent);
       setWordCount(document.wordCount || 0);
     }
   }, [document, content]);
@@ -233,6 +356,7 @@ export function StudentWorkspace() {
     try {
       await updateDocument(groupId, {
         textContent: content,
+        htmlContent: sanitizeRichHtml(htmlContent),
         wordCount,
         updatedAt: Date.now(),
         updatedBy: user?.uid || '',
@@ -541,8 +665,9 @@ export function StudentWorkspace() {
               <div className="min-h-[380px] sm:min-h-[460px] text-slate-800 leading-relaxed font-sans">
                 <CollaborativeEditor
                   ydoc={null}
-                  content={document?.textContent || ''}
+                  content={document?.htmlContent || document?.textContent || ''}
                   onChange={handleContentChange}
+                  onHtmlChange={handleHtmlChange}
                   editable={isEditable}
                   user={{ name: userName, color: userColor }}
                 />
@@ -591,6 +716,32 @@ export function StudentWorkspace() {
                 </span>
               )}
             </div>
+
+            {receivedReviews.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Received reviews</p>
+                {receivedReviews.map((review) => {
+                  const reviewer = groups.find((group) => group.id === review.reviewerGroupId);
+                  const count = receivedResponseCounts[review.id];
+                  return (
+                    <div key={review.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-xs font-extrabold text-slate-900">{reviewer?.name || 'Reviewer group'}</p>
+                      {count && (
+                        <p className="mt-1 text-xs font-bold text-slate-700">
+                          {count.checked}/{count.total} criteria met
+                        </p>
+                      )}
+                      {review.overallFeedback && (
+                        <p className="mt-1 text-xs text-slate-600">{review.overallFeedback}</p>
+                      )}
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        Submitted {review.submittedAt ? new Date(review.submittedAt).toLocaleString() : ''}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {!hasSubmittedOwnGroup ? (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center space-y-2">
@@ -682,15 +833,141 @@ export function StudentWorkspace() {
               <span className="text-slate-400 italic">This group has not written any content yet.</span>
             )}
           </div>
-          <CommentsSidebar
-            comments={reviewComments}
-            canComment={hasSubmittedOwnGroup}
-            selectedQuote={selectedQuote}
-            highlightColor={highlightColor}
-            onHighlightColorChange={setHighlightColor}
-            onClearSelection={() => setSelectedQuote(null)}
-            onAddComment={handleAddReviewComment}
-          />
+          <aside className="w-full lg:w-[360px] shrink-0">
+            <div className="flex gap-2 rounded-2xl bg-slate-100 p-1 mb-3">
+              {(['checklist', 'comments'] as const).map((tab) => (
+                <button
+                  type="button"
+                  key={tab}
+                  onClick={() => setPeerReviewTab(tab)}
+                  className={`flex-1 rounded-xl px-3 py-2 text-xs font-bold capitalize ${
+                    peerReviewTab === tab ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-500'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            {peerReviewTab === 'checklist' ? (
+              <div className="rounded-3xl border border-slate-200 bg-white p-4 space-y-4">
+                <div>
+                  <p className="text-base font-extrabold text-slate-900">Peer Review Checklist</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Reviewing: {groups.find((g) => g.id === reviewGroupId)?.name || 'Target group'}
+                  </p>
+                  {currentGroup && (
+                    <p className="text-xs text-slate-500">Reviewed by: {currentGroup.name}</p>
+                  )}
+                </div>
+
+                {!activeChecklist ? (
+                  <p className="rounded-xl bg-slate-50 p-3 text-xs text-slate-500">
+                    No checklist provided yet
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {activeChecklist.criteria.map((criterion) => {
+                      const response = peerResponses.find((item) => item.criterionId === criterion.criterionId);
+                      return (
+                        <label key={criterion.criterionId} className="flex items-start gap-2 rounded-xl border border-slate-100 p-2.5 text-xs text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={response?.checked ?? false}
+                            disabled={!peerDraft}
+                            onChange={(event) => {
+                              if (!classId || !groupId || !reviewGroupId || !user?.uid) return;
+                              setPeerReviewCriterion(
+                                classId,
+                                groupId,
+                                reviewGroupId,
+                                criterion.criterionId,
+                                event.target.checked,
+                                user.uid
+                              ).catch((error: Error) => setToast({ message: error.message, type: 'error' }));
+                            }}
+                          />
+                          <span>{criterion.text}</span>
+                        </label>
+                      );
+                    })}
+                    <p className="text-xs font-bold text-slate-600">
+                      {peerResponses.filter((response) => response.checked).length}/{activeChecklist.criteria.length} criteria met
+                    </p>
+                    <label className="block text-xs font-bold text-slate-600">
+                      Overall feedback
+                      <textarea
+                        rows={4}
+                        value={peerDraft?.overallFeedback ?? ''}
+                        onChange={(event) => {
+                          if (!classId || !groupId || !reviewGroupId || !user?.uid) return;
+                          updatePeerReviewOverallFeedback(
+                            classId,
+                            groupId,
+                            reviewGroupId,
+                            user.uid,
+                            event.target.value
+                          ).catch((error: Error) => setToast({ message: error.message, type: 'error' }));
+                        }}
+                        className="ws-field mt-1.5 resize-none"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={!peerDraft}
+                      onClick={async () => {
+                        if (!classId || !groupId || !reviewGroupId || !user?.uid) return;
+                        try {
+                          if (publishedReview) {
+                            await savePublishedPeerReviewChanges({
+                              classId,
+                              reviewerGroupId: groupId,
+                              targetGroupId: reviewGroupId,
+                              uid: user.uid,
+                            });
+                            setToast({ message: 'Review changes saved', type: 'success' });
+                          } else {
+                            await submitPeerReview({
+                              classId,
+                              reviewerGroupId: groupId,
+                              targetGroupId: reviewGroupId,
+                              uid: user.uid,
+                            });
+                            setToast({ message: 'Review submitted', type: 'success' });
+                          }
+                        } catch (error: unknown) {
+                          setToast({
+                            message: error instanceof Error ? error.message : 'Could not submit review',
+                            type: 'error',
+                          });
+                        }
+                      }}
+                      className="ws-btn-primary w-full py-2.5 text-xs"
+                    >
+                      {publishedReview ? 'Save changes' : 'Submit review'}
+                    </button>
+                    {publishedReview && (
+                      <p className="text-xs font-bold text-green-700">Review submitted</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <CommentsSidebar
+                comments={reviewComments}
+                canComment={hasSubmittedOwnGroup}
+                currentUserId={user?.uid}
+                selectedQuote={selectedQuote}
+                highlightColor={highlightColor}
+                onHighlightColorChange={setHighlightColor}
+                onClearSelection={() => setSelectedQuote(null)}
+                onAddComment={handleAddReviewComment}
+                onEditComment={(commentId, body) => updateWritingComment(commentId, body)}
+                onDeleteReply={(commentId) => deleteWritingReply(commentId)}
+                onSoftDeleteThread={(commentId) => softDeleteWritingComment(commentId, user?.uid || '')}
+              />
+            )}
+          </aside>
         </div>
       </Modal>
 

@@ -1,6 +1,9 @@
 ﻿import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { Collaboration } from '@tiptap/extension-collaboration';
+import Underline from '@tiptap/extension-underline';
+import TextAlign from '@tiptap/extension-text-align';
+import Highlight from '@tiptap/extension-highlight';
 import * as Y from 'yjs';
 import { cn } from '@/utils';
 
@@ -8,6 +11,7 @@ interface CollaborativeEditorProps {
   ydoc: Y.Doc | null;
   content?: string;
   onChange?: (content: string) => void;
+  onHtmlChange?: (html: string) => void;
   onSelectText?: (text: string) => void;
   editable?: boolean;
   className?: string;
@@ -18,6 +22,7 @@ export function CollaborativeEditor({
   ydoc,
   content = '',
   onChange,
+  onHtmlChange,
   onSelectText,
   editable = true,
   className,
@@ -26,6 +31,13 @@ export function CollaborativeEditor({
     extensions: [
       StarterKit.configure({
         history: false,
+      }),
+      Underline,
+      TextAlign.configure({
+        types: ['heading', 'paragraph'],
+      }),
+      Highlight.configure({
+        multicolor: true,
       }),
       ...(ydoc
         ? [
@@ -39,6 +51,7 @@ export function CollaborativeEditor({
     editable,
     onUpdate: ({ editor }) => {
       onChange?.(editor.getText());
+      onHtmlChange?.(editor.getHTML());
     },
     onSelectionUpdate: ({ editor }) => {
       if (!editable || !onSelectText) return;
@@ -72,28 +85,70 @@ function Toolbar({ editor, editable }: { editor: any; editable: boolean }) {
     <div className="border-b border-slate-200 p-2 flex gap-1 bg-slate-50 rounded-t-lg">
       <button
         onClick={() => editor.chain().focus().toggleBold().run()}
-        disabled={!editor.can().toggleBold()}
-        className="px-2 py-1 rounded hover:bg-slate-200 disabled:opacity-40"
+        className={cn('px-2 py-1 rounded hover:bg-slate-200', editor.isActive('bold') && 'bg-slate-200')}
         title="Bold"
       >
         <b>B</b>
       </button>
       <button
         onClick={() => editor.chain().focus().toggleItalic().run()}
-        disabled={!editor.can().toggleItalic()}
-        className="px-2 py-1 rounded hover:bg-slate-200 disabled:opacity-40"
+        className={cn('px-2 py-1 rounded hover:bg-slate-200', editor.isActive('italic') && 'bg-slate-200')}
         title="Italic"
       >
         <i>I</i>
       </button>
       <button
-        onClick={() => editor.chain().focus().toggleStrike().run()}
-        disabled={!editor.can().toggleStrike()}
-        className="px-2 py-1 rounded hover:bg-slate-200 disabled:opacity-40"
-        title="Strikethrough"
+        onClick={() => editor.chain().focus().toggleUnderline().run()}
+        className={cn('px-2 py-1 rounded hover:bg-slate-200', editor.isActive('underline') && 'bg-slate-200')}
+        title="Underline (Ctrl+U)"
       >
-        <s>S</s>
+        <u>U</u>
       </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleHighlight({ color: '#fef08a' }).run()}
+        className={cn('px-2 py-1 rounded hover:bg-slate-200', editor.isActive('highlight') && 'bg-yellow-100')}
+        title="Highlight"
+      >
+        <span className="bg-yellow-200 px-1">H</span>
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().undo().run()}
+        disabled={!editor.can().undo()}
+        className="px-2 py-1 rounded hover:bg-slate-200 disabled:opacity-40"
+        title="Undo"
+      >
+        ↶
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().redo().run()}
+        disabled={!editor.can().redo()}
+        className="px-2 py-1 rounded hover:bg-slate-200 disabled:opacity-40"
+        title="Redo"
+      >
+        ↷
+      </button>
+      <span className="w-px h-6 bg-slate-300 mx-1" />
+      {([
+        ['left', 'Align left'],
+        ['center', 'Align center'],
+        ['right', 'Align right'],
+      ] as const).map(([alignment, title]) => (
+        <button
+          key={alignment}
+          type="button"
+          onClick={() => editor.chain().focus().setTextAlign(alignment).run()}
+          className={cn(
+            'px-2 py-1 rounded hover:bg-slate-200',
+            editor.isActive({ textAlign: alignment }) && 'bg-slate-200'
+          )}
+          title={title}
+        >
+          {alignment === 'left' ? '≡' : alignment === 'center' ? '≡' : '≡'}
+        </button>
+      ))}
       <span className="w-px h-6 bg-slate-300 mx-1" />
       <button
         onClick={() => editor.chain().focus().toggleBulletList().run()}

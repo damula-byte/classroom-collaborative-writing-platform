@@ -18,22 +18,29 @@ export function AnnotationHighlighter({
       return escapeHtml(content);
     }
 
-    // Sort annotations by position (descending) to avoid offset shifts
-    const sorted = [...annotations].sort((a, b) => b.from - a.from);
-    let html = content;
-
-    // Simple approach: replace selected text with highlighted spans
-    for (const ann of sorted) {
+    const segments: Array<{ start: number; end: number; annotation: Annotation }> = [];
+    for (const ann of annotations) {
       if (!ann.selectedText) continue;
-      const escaped = escapeRegex(ann.selectedText);
-      const regex = new RegExp(`(${escaped})`, 'g');
-      const color = annotationColor(ann.type);
-      html = html.replace(
-        regex,
-        `<mark class="annotation-highlight" style="background-color: ${color}; cursor: pointer; border-radius: 2px;" data-annotation-id="${ann.id}">$1</mark>`
-      );
+      let start = ann.from > 0 ? ann.from : -1;
+      if (start >= 0 && content.slice(start, start + ann.selectedText.length) !== ann.selectedText) {
+        start = content.indexOf(ann.selectedText);
+      }
+      if (start < 0) continue;
+      const end = start + ann.selectedText.length;
+      segments.push({ start, end, annotation: ann });
     }
 
+    segments.sort((a, b) => a.start - b.start);
+    let cursor = 0;
+    let html = '';
+    for (const segment of segments) {
+      if (segment.start < cursor) continue;
+      html += escapeHtml(content.slice(cursor, segment.start));
+      const color = annotationColor(segment.annotation.type);
+      html += `<mark class="annotation-highlight" style="background-color: ${color}; cursor: pointer; border-radius: 2px;" data-annotation-id="${segment.annotation.id}">${escapeHtml(content.slice(segment.start, segment.end))}</mark>`;
+      cursor = segment.end;
+    }
+    html += escapeHtml(content.slice(cursor));
     return html;
   }, [content, annotations]);
 
@@ -61,10 +68,6 @@ function escapeHtml(text: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function annotationColor(type: string): string {

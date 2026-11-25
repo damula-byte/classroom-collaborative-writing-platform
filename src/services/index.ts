@@ -25,6 +25,11 @@ import {
   WritingComment,
   Vote,
   HighlightColor,
+  ChecklistCriterion,
+  ChecklistVersion,
+  PeerReviewDraft,
+  PeerReviewPublished,
+  ChecklistResponse,
 } from '@/types';
 import {
   cleanDisplayName,
@@ -61,6 +66,7 @@ function mapGroupDoc(id: string, data: Record<string, unknown>): Group {
     id,
     maxMembers: clampMaxMembers((data.maxMembers as number | undefined) ?? 4),
     members: Array.isArray(data.members) ? data.members : [],
+    memberIds: Array.isArray(data.memberIds) ? data.memberIds as string[] : undefined,
     createdAt: toMillis(data.createdAt),
     updatedAt: data.updatedAt ? toMillis(data.updatedAt) : undefined,
     submittedAt: data.submittedAt ? toMillis(data.submittedAt) : null,
@@ -135,6 +141,7 @@ export async function createGroup(classId: string, name: string): Promise<string
     classId,
     name,
     members: [],
+    memberIds: [],
     status: 'WRITING',
     locked: false,
     createdAt: serverTimestamp(),
@@ -474,6 +481,7 @@ export async function createWriteSpaceGroup(
     prompt: (data.prompt ?? '').trim().slice(0, 500),
     maxMembers,
     members: [],
+    memberIds: [],
     status: 'WRITING',
     locked: false,
     submittedAt: null,
@@ -535,6 +543,13 @@ export async function joinGroupAtomic(
     const existingByUid = members.find((m) => m.uid === studentUid);
     if (existingByUid) {
       // Idempotent reconnect
+      tx.update(
+        groupRef,
+        {
+          memberIds: Array.from(new Set([...(group.memberIds ?? []), studentUid])),
+          updatedAt: serverTimestamp(),
+        }
+      );
       tx.set(
         studentRef,
         {
@@ -570,6 +585,7 @@ export async function joinGroupAtomic(
 
     tx.update(groupRef, {
       members,
+      memberIds: [...(Array.isArray(group.memberIds) ? group.memberIds : []), studentUid],
       updatedAt: serverTimestamp(),
     });
     tx.set(
@@ -620,7 +636,11 @@ export async function removeGroupMember(
     if (!snap.exists()) throw new Error('Writing group not found.');
     const group = mapGroupDoc(snap.id, snap.data());
     const nextMembers = group.members.filter((m) => m.uid !== memberUid);
-    tx.update(groupRef, { members: nextMembers, updatedAt: serverTimestamp() });
+    tx.update(groupRef, {
+      members: nextMembers,
+      memberIds: (group.memberIds ?? nextMembers.map((m) => m.uid)).filter((uid) => uid !== memberUid),
+      updatedAt: serverTimestamp(),
+    });
     tx.set(
       studentRef,
       {
@@ -662,12 +682,42 @@ export async function deleteGroupSafely(classId: string, groupId: string): Promi
   const batch = writeBatch(db);
   batch.delete(doc(db, `classes/${classId}/groups`, groupId));
   batch.delete(doc(db, 'documents', groupId));
+
+  for (const collectionName of ['peerReviewDrafts', 'peerReviews'] as const) {
+    const snap = await getDocs(collection(db, `classes/${classId}/${collectionName}`));
+    for (const reviewSnap of snap.docs) {
+      const data = reviewSnap.data();
+      if (data.reviewerGroupId === groupId || data.targetGroupId === groupId) {
+        const responses = await getDocs(collection(reviewSnap.ref, 'responses'));
+        responses.docs.forEach((response) => batch.delete(response.ref));
+        batch.delete(reviewSnap.ref);
+      }
+    }
+  }
   await batch.commit();
 }
 
 export async function deleteClassSafely(classId: string): Promise<void> {
   const groupsSnap = await getDocs(collection(db, `classes/${classId}/groups`));
   const batch = writeBatch(db);
+  for (const collectionName of [
+    'peerReviewDrafts',
+    'peerReviews',
+    'checklistVersions',
+  ] as const) {
+    const snap = await getDocs(collection(db, `classes/${classId}/${collectionName}`));
+    snap.docs.forEach((item) => batch.delete(item.ref));
+  }
+  const draftSnap = await getDocs(collection(db, `classes/${classId}/peerReviewDrafts`));
+  for (const draft of draftSnap.docs) {
+    const responses = await getDocs(collection(draft.ref, 'responses'));
+    responses.docs.forEach((response) => batch.delete(response.ref));
+  }
+  const publishedSnap = await getDocs(collection(db, `classes/${classId}/peerReviews`));
+  for (const published of publishedSnap.docs) {
+    const responses = await getDocs(collection(published.ref, 'responses'));
+    responses.docs.forEach((response) => batch.delete(response.ref));
+  }
   groupsSnap.docs.forEach((g) => {
     batch.delete(g.ref);
     batch.delete(doc(db, 'documents', g.id));
@@ -710,6 +760,14 @@ export async function createWritingComment(data: {
     anchorEnd: data.anchorEnd ?? null,
     documentRevision: data.documentRevision ?? null,
     createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    editedAt: null,
+    status: 'open',
+    resolvedAt: null,
+    resolvedBy: null,
+    isDeleted: false,
+    deletedAt: null,
+    deletedBy: null,
   });
   return ref.id;
 }
@@ -723,7 +781,15 @@ export function subscribeToWritingComments(
   return onSnapshot(
     q,
     (snap) => {
-      const results: WritingComment[] = snap.docs.map((d) => {
+      const deletedRootIds = new Set(
+        snap.docs
+          .filter((d) => d.data().isDeleted === true)
+          .map((d) => d.id)
+      );
+      const results: WritingComment[] = snap.docs
+        .filter((d) => d.data().isDeleted !== true)
+        .filter((d) => !d.data().parentId || !deletedRootIds.has(d.data().parentId))
+        .map((d) => {
         const data = d.data();
         return {
           id: d.id,
@@ -740,6 +806,14 @@ export function subscribeToWritingComments(
           anchorEnd: data.anchorEnd ?? null,
           documentRevision: data.documentRevision ?? null,
           createdAt: toMillis(data.createdAt),
+          updatedAt: data.updatedAt ? toMillis(data.updatedAt) : undefined,
+          editedAt: data.editedAt ? toMillis(data.editedAt) : null,
+          status: data.status === 'resolved' ? 'resolved' : 'open',
+          resolvedAt: data.resolvedAt ? toMillis(data.resolvedAt) : null,
+          resolvedBy: data.resolvedBy ?? null,
+          isDeleted: data.isDeleted === true,
+          deletedAt: data.deletedAt ? toMillis(data.deletedAt) : null,
+          deletedBy: data.deletedBy ?? null,
         };
       });
       results.sort((a, b) => a.createdAt - b.createdAt);
@@ -750,6 +824,670 @@ export function subscribeToWritingComments(
       onError?.(err);
     }
   );
+}
+
+export async function updateWritingComment(
+  commentId: string,
+  body: string
+): Promise<void> {
+  const cleanBody = body.trim().slice(0, 2000);
+  if (!cleanBody) throw new Error('Comment cannot be empty.');
+  await updateDoc(doc(db, 'comments', commentId), {
+    body: cleanBody,
+    editedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteWritingReply(commentId: string): Promise<void> {
+  await deleteDoc(doc(db, 'comments', commentId));
+}
+
+export async function softDeleteWritingComment(commentId: string, uid: string): Promise<void> {
+  const ref = doc(db, 'comments', commentId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error('Comment not found.');
+  const data = snap.data();
+  if (data.parentId) throw new Error('Use reply deletion for a reply.');
+  await updateDoc(ref, {
+    isDeleted: true,
+    deletedAt: serverTimestamp(),
+    deletedBy: uid,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function resolveWritingComment(
+  commentId: string,
+  uid: string
+): Promise<void> {
+  await updateDoc(doc(db, 'comments', commentId), {
+    status: 'resolved',
+    resolvedAt: serverTimestamp(),
+    resolvedBy: uid,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function reopenWritingComment(commentId: string): Promise<void> {
+  await updateDoc(doc(db, 'comments', commentId), {
+    status: 'open',
+    resolvedAt: null,
+    resolvedBy: null,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export function getPeerReviewPairId(
+  reviewerGroupId: string,
+  targetGroupId: string
+): string {
+  return `${reviewerGroupId}__${targetGroupId}`;
+}
+
+export async function savePeerReviewChecklist(
+  classId: string,
+  criteria: Array<{ criterionId?: string; text: string; order: number }>,
+  uid: string
+): Promise<string> {
+  const trimmed = criteria.map((criterion, index) => ({
+    criterionId: criterion.criterionId?.trim() || `criterion-${doc(collection(db, `classes/${classId}/checklistVersions`)).id}`,
+    text: criterion.text.trim(),
+    order: Number.isFinite(criterion.order) ? criterion.order : index,
+  })).map((criterion, index) => ({ ...criterion, order: index }));
+
+  if (trimmed.length === 0) throw new Error('At least one checklist criterion is required.');
+  if (trimmed.some((criterion) => !criterion.text)) {
+    throw new Error('Checklist criterion text cannot be empty.');
+  }
+  if (new Set(trimmed.map((criterion) => criterion.criterionId)).size !== trimmed.length) {
+    throw new Error('Checklist criterion IDs must be unique.');
+  }
+
+  const configRef = doc(db, `classes/${classId}/peerReviewChecklist`, 'active');
+  const versionRef = doc(collection(db, `classes/${classId}/checklistVersions`));
+  let savedVersionId = versionRef.id;
+
+  await runTransaction(db, async (tx) => {
+    const configSnap = await tx.get(configRef);
+    const activeVersionId =
+      configSnap.exists()
+        ? configSnap.data().activeVersionId as string | undefined
+        : undefined;
+
+    if (activeVersionId) {
+      const activeVersionSnap = await tx.get(
+        doc(db, `classes/${classId}/checklistVersions`, activeVersionId)
+      );
+      if (activeVersionSnap.exists()) {
+        const activeCriteria = activeVersionSnap.data().criteria;
+        if (
+          Array.isArray(activeCriteria) &&
+          activeCriteria.length === trimmed.length &&
+          activeCriteria.every((criterion: ChecklistCriterion, index: number) =>
+            criterion.criterionId === trimmed[index].criterionId &&
+            criterion.text === trimmed[index].text &&
+            criterion.order === trimmed[index].order
+          )
+        ) {
+          savedVersionId = activeVersionId;
+          return;
+        }
+      }
+    }
+
+    const nextVersionNumber =
+      configSnap.exists() ? ((configSnap.data().versionNumber as number) || 0) + 1 : 1;
+
+    tx.set(versionRef, {
+      id: versionRef.id,
+      classId,
+      versionNumber: nextVersionNumber,
+      criteria: trimmed,
+      criterionIds: trimmed.map((criterion) => criterion.criterionId),
+      createdBy: uid,
+      createdAt: serverTimestamp(),
+    });
+    tx.set(configRef, {
+      classId,
+      activeVersionId: versionRef.id,
+      versionNumber: nextVersionNumber,
+      updatedBy: uid,
+      updatedAt: serverTimestamp(),
+    });
+  });
+
+  return savedVersionId;
+}
+
+export function subscribeToActivePeerReviewChecklist(
+  classId: string,
+  cb: (version: ChecklistVersion | null) => void,
+  onError?: (err: Error) => void
+) {
+  const configRef = doc(db, `classes/${classId}/peerReviewChecklist`, 'active');
+  return onSnapshot(configRef, async (configSnap) => {
+    if (!configSnap.exists()) {
+      cb(null);
+      return;
+    }
+    const activeVersionId = configSnap.data().activeVersionId as string | undefined;
+    if (!activeVersionId) {
+      cb(null);
+      return;
+    }
+    try {
+      const versionSnap = await getDoc(
+        doc(db, `classes/${classId}/checklistVersions`, activeVersionId)
+      );
+      if (!versionSnap.exists()) {
+        cb(null);
+        return;
+      }
+      const data = versionSnap.data();
+      cb({
+        id: versionSnap.id,
+        classId: data.classId,
+        versionNumber: data.versionNumber,
+        criteria: Array.isArray(data.criteria) ? data.criteria : [],
+        criterionIds: Array.isArray(data.criterionIds) ? data.criterionIds : [],
+        createdBy: data.createdBy,
+        createdAt: toMillis(data.createdAt),
+      });
+    } catch (err) {
+      onError?.(err as Error);
+    }
+  }, (err) => onError?.(err));
+}
+
+export async function createOrGetPeerReviewDraft(params: {
+  classId: string;
+  reviewerGroupId: string;
+  targetGroupId: string;
+  uid: string;
+}): Promise<PeerReviewDraft> {
+  const { classId, reviewerGroupId, targetGroupId, uid } = params;
+  if (reviewerGroupId === targetGroupId) {
+    throw new Error('A group cannot review its own writing.');
+  }
+
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  const draftRef = doc(db, `classes/${classId}/peerReviewDrafts`, pairId);
+  const configRef = doc(db, `classes/${classId}/peerReviewChecklist`, 'active');
+
+  await runTransaction(db, async (tx) => {
+    const [
+      classSnap,
+      reviewerSnap,
+      targetSnap,
+      studentSnap,
+      configSnap,
+      draftSnap,
+      targetDocumentSnap,
+    ] = await Promise.all([
+      tx.get(doc(db, 'classes', classId)),
+      tx.get(doc(db, `classes/${classId}/groups`, reviewerGroupId)),
+      tx.get(doc(db, `classes/${classId}/groups`, targetGroupId)),
+      tx.get(doc(db, `classes/${classId}/students`, uid)),
+      tx.get(configRef),
+      tx.get(draftRef),
+      tx.get(doc(db, 'documents', targetGroupId)),
+    ]);
+
+    if (!classSnap.exists()) throw new Error('Classroom not found.');
+    if (!reviewerSnap.exists() || !targetSnap.exists()) throw new Error('Writing group not found.');
+
+    const reviewer = mapGroupDoc(reviewerSnap.id, reviewerSnap.data());
+    const target = mapGroupDoc(targetSnap.id, targetSnap.data());
+    const student = studentSnap.exists() ? studentSnap.data() : null;
+    const memberIds = Array.isArray(reviewer.memberIds)
+      ? reviewer.memberIds
+      : reviewer.members.map((member) => member.uid);
+
+    if (!student || student.groupId !== reviewerGroupId || !memberIds.includes(uid)) {
+      throw new Error('You are not a current member of the reviewer group.');
+    }
+    if (!['SUBMITTED', 'REVIEWING', 'REVIEWED'].includes(reviewer.status)) {
+      throw new Error('Submit your group writing to unlock peer review.');
+    }
+    if (!['SUBMITTED', 'REVIEWING', 'REVIEWED'].includes(target.status)) {
+      throw new Error('The target group has not submitted writing.');
+    }
+    if (!configSnap.exists()) throw new Error('No checklist provided yet.');
+
+    const activeVersionId = configSnap.data().activeVersionId as string | undefined;
+    if (!activeVersionId) throw new Error('No checklist provided yet.');
+    if (!draftSnap.exists()) {
+      tx.set(draftRef, {
+        id: pairId,
+        classId,
+        reviewerGroupId,
+        targetGroupId,
+        checklistVersionId: activeVersionId,
+        overallFeedback: '',
+        status: 'draft',
+        createdBy: uid,
+        createdAt: serverTimestamp(),
+        updatedBy: uid,
+        updatedAt: serverTimestamp(),
+        submittedBy: null,
+        submittedAt: null,
+        revision: 1,
+        reviewedDocumentRevision:
+          targetDocumentSnap.exists() ? targetDocumentSnap.data().version ?? null : null,
+      });
+    }
+  });
+
+  const snap = await getDoc(draftRef);
+  const data = snap.data();
+  if (!snap.exists() || !data) throw new Error('Peer review draft could not be created.');
+  return {
+    id: snap.id,
+    classId: data.classId,
+    reviewerGroupId: data.reviewerGroupId,
+    targetGroupId: data.targetGroupId,
+    checklistVersionId: data.checklistVersionId,
+    overallFeedback: data.overallFeedback ?? '',
+    status: data.status,
+    createdBy: data.createdBy,
+    createdAt: toMillis(data.createdAt),
+    updatedBy: data.updatedBy,
+    updatedAt: toMillis(data.updatedAt),
+    submittedBy: data.submittedBy ?? null,
+    submittedAt: data.submittedAt ? toMillis(data.submittedAt) : null,
+    revision: data.revision ?? 1,
+    reviewedDocumentRevision: data.reviewedDocumentRevision ?? null,
+  };
+}
+
+export function subscribeToPeerReviewDraft(
+  classId: string,
+  reviewerGroupId: string,
+  targetGroupId: string,
+  cb: (draft: PeerReviewDraft | null) => void,
+  onError?: (err: Error) => void
+) {
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  return onSnapshot(doc(db, `classes/${classId}/peerReviewDrafts`, pairId), (snap) => {
+    if (!snap.exists()) {
+      cb(null);
+      return;
+    }
+    const data = snap.data();
+    cb({
+      id: snap.id,
+      classId: data.classId,
+      reviewerGroupId: data.reviewerGroupId,
+      targetGroupId: data.targetGroupId,
+      checklistVersionId: data.checklistVersionId,
+      overallFeedback: data.overallFeedback ?? '',
+      status: data.status,
+      createdBy: data.createdBy,
+      createdAt: toMillis(data.createdAt),
+      updatedBy: data.updatedBy,
+      updatedAt: toMillis(data.updatedAt),
+      submittedBy: data.submittedBy ?? null,
+      submittedAt: data.submittedAt ? toMillis(data.submittedAt) : null,
+      revision: data.revision ?? 1,
+      reviewedDocumentRevision: data.reviewedDocumentRevision ?? null,
+    });
+  }, (err) => onError?.(err));
+}
+
+export async function setPeerReviewCriterion(
+  classId: string,
+  reviewerGroupId: string,
+  targetGroupId: string,
+  criterionId: string,
+  checked: boolean,
+  uid: string
+): Promise<void> {
+  if (typeof checked !== 'boolean') throw new Error('Checklist response must be Boolean.');
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  await setDoc(
+    doc(
+      db,
+      `classes/${classId}/peerReviewDrafts`,
+      pairId,
+      'responses',
+      criterionId
+    ),
+    {
+      criterionId,
+      checked,
+      updatedBy: uid,
+      updatedAt: serverTimestamp(),
+    }
+  );
+}
+
+export async function updatePeerReviewOverallFeedback(
+  classId: string,
+  reviewerGroupId: string,
+  targetGroupId: string,
+  uid: string,
+  overallFeedback: string
+): Promise<void> {
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  const draftRef = doc(db, `classes/${classId}/peerReviewDrafts`, pairId);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(draftRef);
+    if (!snap.exists()) throw new Error('Peer review draft not found.');
+    const data = snap.data();
+    if (data.status === 'submitted') throw new Error('Use save changes for a submitted review.');
+    tx.update(draftRef, {
+      overallFeedback: overallFeedback.slice(0, 5000),
+      updatedBy: uid,
+      updatedAt: serverTimestamp(),
+      revision: ((data.revision as number) || 1) + 1,
+    });
+  });
+}
+
+export function subscribeToPeerReviewPublished(
+  classId: string,
+  reviewerGroupId: string,
+  targetGroupId: string,
+  cb: (review: PeerReviewPublished | null) => void,
+  onError?: (err: Error) => void
+) {
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  return onSnapshot(doc(db, `classes/${classId}/peerReviews`, pairId), (snap) => {
+    if (!snap.exists()) {
+      cb(null);
+      return;
+    }
+    const data = snap.data();
+    cb({
+      id: snap.id,
+      classId: data.classId,
+      reviewerGroupId: data.reviewerGroupId,
+      targetGroupId: data.targetGroupId,
+      checklistVersionId: data.checklistVersionId,
+      overallFeedback: data.overallFeedback ?? '',
+      status: 'submitted',
+      createdBy: data.createdBy,
+      createdAt: toMillis(data.createdAt),
+      updatedBy: data.updatedBy,
+      updatedAt: toMillis(data.updatedAt),
+      submittedBy: data.submittedBy,
+      submittedAt: toMillis(data.submittedAt),
+      revision: data.revision ?? 1,
+      reviewedDocumentRevision: data.reviewedDocumentRevision ?? null,
+    });
+  }, (err) => onError?.(err));
+}
+
+export function subscribeToPublishedReviewsForTarget(
+  classId: string,
+  targetGroupId: string,
+  cb: (reviews: PeerReviewPublished[]) => void,
+  onError?: (err: Error) => void
+) {
+  const q = query(
+    collection(db, `classes/${classId}/peerReviews`),
+    where('targetGroupId', '==', targetGroupId),
+    where('status', '==', 'submitted')
+  );
+  return onSnapshot(q, (snap) => {
+    cb(snap.docs.map((reviewSnap) => {
+      const data = reviewSnap.data();
+      return {
+        id: reviewSnap.id,
+        classId: data.classId,
+        reviewerGroupId: data.reviewerGroupId,
+        targetGroupId: data.targetGroupId,
+        checklistVersionId: data.checklistVersionId,
+        overallFeedback: data.overallFeedback ?? '',
+        status: 'submitted',
+        createdBy: data.createdBy,
+        createdAt: toMillis(data.createdAt),
+        updatedBy: data.updatedBy,
+        updatedAt: toMillis(data.updatedAt),
+        submittedBy: data.submittedBy,
+        submittedAt: toMillis(data.submittedAt),
+        revision: data.revision ?? 1,
+        reviewedDocumentRevision: data.reviewedDocumentRevision ?? null,
+      };
+    }));
+  }, (err) => onError?.(err));
+}
+
+export function subscribeToPeerReviewResponses(
+  classId: string,
+  pairId: string,
+  location: 'draft' | 'published',
+  cb: (responses: ChecklistResponse[]) => void,
+  onError?: (err: Error) => void
+) {
+  const collectionName =
+    location === 'draft' ? 'peerReviewDrafts' : 'peerReviews';
+  const q = query(
+    collection(db, `classes/${classId}/${collectionName}`, pairId, 'responses')
+  );
+  return onSnapshot(q, (snap) => {
+    cb(snap.docs.map((responseSnap) => {
+      const data = responseSnap.data();
+      return {
+        criterionId: data.criterionId,
+        checked: data.checked === true,
+        updatedBy: data.updatedBy,
+        updatedAt: toMillis(data.updatedAt),
+      };
+    }));
+  }, (err) => onError?.(err));
+}
+
+export async function submitPeerReview(params: {
+  classId: string;
+  reviewerGroupId: string;
+  targetGroupId: string;
+  uid: string;
+}): Promise<void> {
+  const { classId, reviewerGroupId, targetGroupId, uid } = params;
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  const draftRef = doc(db, `classes/${classId}/peerReviewDrafts`, pairId);
+  const publishedRef = doc(db, `classes/${classId}/peerReviews`, pairId);
+
+  await runTransaction(db, async (tx) => {
+    const [draftSnap, publishedSnap, reviewerSnap, targetSnap, studentSnap] =
+      await Promise.all([
+        tx.get(draftRef),
+        tx.get(publishedRef),
+        tx.get(doc(db, `classes/${classId}/groups`, reviewerGroupId)),
+        tx.get(doc(db, `classes/${classId}/groups`, targetGroupId)),
+        tx.get(doc(db, `classes/${classId}/students`, uid)),
+      ]);
+
+    if (!draftSnap.exists()) throw new Error('Peer review draft not found.');
+    if (publishedSnap.exists()) throw new Error('This group review has already been submitted.');
+    if (!reviewerSnap.exists() || !targetSnap.exists()) throw new Error('Writing group not found.');
+
+    const reviewer = mapGroupDoc(reviewerSnap.id, reviewerSnap.data());
+    const target = mapGroupDoc(targetSnap.id, targetSnap.data());
+    const memberIds = Array.isArray(reviewer.memberIds)
+      ? reviewer.memberIds
+      : reviewer.members.map((member) => member.uid);
+    const student = studentSnap.exists() ? studentSnap.data() : null;
+
+    if (!student || student.groupId !== reviewerGroupId || !memberIds.includes(uid)) {
+      throw new Error('You are not a current member of the reviewer group.');
+    }
+    if (!['SUBMITTED', 'REVIEWING', 'REVIEWED'].includes(reviewer.status)) {
+      throw new Error('Submit your group writing to unlock peer review.');
+    }
+    if (!['SUBMITTED', 'REVIEWING', 'REVIEWED'].includes(target.status)) {
+      throw new Error('The target group has not submitted writing.');
+    }
+
+    const draft = draftSnap.data();
+    if (draft.status === 'submitted') {
+      throw new Error('This group review has already been submitted.');
+    }
+    if (draft.reviewerGroupId !== reviewerGroupId || draft.targetGroupId !== targetGroupId) {
+      throw new Error('Peer review identity does not match.');
+    }
+
+    const versionRef = doc(
+      db,
+      `classes/${classId}/checklistVersions`,
+      draft.checklistVersionId
+    );
+    const versionSnap = await tx.get(versionRef);
+    if (!versionSnap.exists()) throw new Error('Checklist version not found.');
+    const criterionIds = Array.isArray(versionSnap.data().criterionIds)
+      ? versionSnap.data().criterionIds as string[]
+      : [];
+
+    const responseSnaps = await Promise.all(
+      criterionIds.map((criterionId) =>
+        tx.get(doc(
+          db,
+          `classes/${classId}/peerReviewDrafts`,
+          pairId,
+          'responses',
+          criterionId
+        ))
+      )
+    );
+
+    const submittedAt = serverTimestamp();
+    const updatedAt = serverTimestamp();
+    const revision = ((draft.revision as number) || 1) + 1;
+    tx.set(publishedRef, {
+      id: pairId,
+      classId,
+      reviewerGroupId,
+      targetGroupId,
+      checklistVersionId: draft.checklistVersionId,
+      overallFeedback: draft.overallFeedback ?? '',
+      status: 'submitted',
+      createdBy: draft.createdBy,
+      createdAt: draft.createdAt,
+      updatedBy: uid,
+      updatedAt,
+      submittedBy: uid,
+      submittedAt,
+      revision,
+      reviewedDocumentRevision: draft.reviewedDocumentRevision ?? null,
+    });
+
+    responseSnaps.forEach((responseSnap, index) => {
+      const criterionId = criterionIds[index];
+      const checked = responseSnap.exists()
+        ? responseSnap.data().checked === true
+        : false;
+      tx.set(
+        doc(db, `classes/${classId}/peerReviews`, pairId, 'responses', criterionId),
+        {
+          criterionId,
+          checked,
+          updatedBy: responseSnap.exists()
+            ? responseSnap.data().updatedBy
+            : uid,
+          updatedAt: responseSnap.exists()
+            ? responseSnap.data().updatedAt
+            : updatedAt,
+        }
+      );
+    });
+
+  });
+}
+
+export async function savePublishedPeerReviewChanges(params: {
+  classId: string;
+  reviewerGroupId: string;
+  targetGroupId: string;
+  uid: string;
+}): Promise<void> {
+  const { classId, reviewerGroupId, targetGroupId, uid } = params;
+  const pairId = getPeerReviewPairId(reviewerGroupId, targetGroupId);
+  const draftRef = doc(db, `classes/${classId}/peerReviewDrafts`, pairId);
+  const publishedRef = doc(db, `classes/${classId}/peerReviews`, pairId);
+
+  await runTransaction(db, async (tx) => {
+    const [draftSnap, publishedSnap, reviewerSnap, studentSnap] = await Promise.all([
+      tx.get(draftRef),
+      tx.get(publishedRef),
+      tx.get(doc(db, `classes/${classId}/groups`, reviewerGroupId)),
+      tx.get(doc(db, `classes/${classId}/students`, uid)),
+    ]);
+
+    if (!draftSnap.exists() || !publishedSnap.exists()) {
+      throw new Error('Submitted peer review not found.');
+    }
+    if (!reviewerSnap.exists()) throw new Error('Reviewer group not found.');
+
+    const reviewer = mapGroupDoc(reviewerSnap.id, reviewerSnap.data());
+    const memberIds = Array.isArray(reviewer.memberIds)
+      ? reviewer.memberIds
+      : reviewer.members.map((member) => member.uid);
+    const student = studentSnap.exists() ? studentSnap.data() : null;
+    if (!student || student.groupId !== reviewerGroupId || !memberIds.includes(uid)) {
+      throw new Error('You are not a current member of the reviewer group.');
+    }
+    if (!['SUBMITTED', 'REVIEWING', 'REVIEWED'].includes(reviewer.status)) {
+      throw new Error('Submit your group writing to remain eligible.');
+    }
+
+    const draft = draftSnap.data();
+    const published = publishedSnap.data();
+    if (draft.checklistVersionId !== published.checklistVersionId) {
+      throw new Error('The published checklist version cannot be changed.');
+    }
+
+    const versionSnap = await tx.get(
+      doc(db, `classes/${classId}/checklistVersions`, draft.checklistVersionId)
+    );
+    if (!versionSnap.exists()) throw new Error('Checklist version not found.');
+    const criterionIds = Array.isArray(versionSnap.data().criterionIds)
+      ? versionSnap.data().criterionIds as string[]
+      : [];
+    const responseSnaps = await Promise.all(
+      criterionIds.map((criterionId) =>
+        tx.get(doc(
+          db,
+          `classes/${classId}/peerReviewDrafts`,
+          pairId,
+          'responses',
+          criterionId
+        ))
+      )
+    );
+
+    const updatedAt = serverTimestamp();
+    const revision = ((published.revision as number) || 1) + 1;
+    tx.update(publishedRef, {
+      overallFeedback: draft.overallFeedback ?? '',
+      updatedBy: uid,
+      updatedAt,
+      revision,
+    });
+
+    responseSnaps.forEach((responseSnap, index) => {
+      const criterionId = criterionIds[index];
+      tx.set(
+        doc(db, `classes/${classId}/peerReviews`, pairId, 'responses', criterionId),
+        {
+          criterionId,
+          checked: responseSnap.exists()
+            ? responseSnap.data().checked === true
+            : false,
+          updatedBy: uid,
+          updatedAt,
+        }
+      );
+    });
+
+    tx.update(draftRef, {
+      overallFeedback: draft.overallFeedback ?? '',
+      updatedBy: uid,
+      updatedAt,
+      revision,
+    });
+  });
 }
 
 // ---- Voting (Atomic Quota Enforcement) ----

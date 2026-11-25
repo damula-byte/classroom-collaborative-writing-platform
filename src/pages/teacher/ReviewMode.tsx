@@ -21,10 +21,15 @@ import {
   subscribeToWritingComments,
   createWritingComment,
   returnToStudents,
+  updateWritingComment,
+  deleteWritingReply,
+  softDeleteWritingComment,
+  resolveWritingComment,
+  reopenWritingComment,
 } from '@/services';
 import { WritingComment, HighlightColor } from '@/types';
 import { BRANDING } from '@/config/branding';
-import { debounce } from '@/utils';
+import { debounce, sanitizeRichHtml } from '@/utils';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -57,6 +62,7 @@ export function ReviewMode() {
 
   const [isEditing, setIsEditing] = useState(false);
   const [wordCount, setWordCount] = useState(0);
+  const [, setHtmlContent] = useState('');
   const [showCommentModal, setShowCommentModal] = useState(false);
   const [selectedText, setSelectedText] = useState('');
   const [commentText, setCommentText] = useState('');
@@ -104,11 +110,12 @@ export function ReviewMode() {
   // Debounced save to Firestore (preserves existing 5000ms debounce)
   const debouncedSave = useMemo(
     () =>
-      debounce(async (text: string, wc: number) => {
+      debounce(async (text: string, html: string, wc: number) => {
         if (!groupId) return;
         try {
           await updateDocument(groupId, {
             textContent: text,
+            htmlContent: sanitizeRichHtml(html),
             wordCount: wc,
             updatedAt: Date.now(),
             updatedBy: user?.uid || '',
@@ -124,7 +131,19 @@ export function ReviewMode() {
     (text: string) => {
       const wc = text.trim().split(/\s+/).filter(Boolean).length;
       setWordCount(wc);
-      debouncedSave(text, wc);
+    },
+    [debouncedSave]
+  );
+
+  const handleHtmlChange = useCallback(
+    (html: string) => {
+      setHtmlContent(html);
+      const element = window.document.createElement('div');
+      element.innerHTML = html;
+      const text = element.textContent || '';
+      const wc = text.trim().split(/\s+/).filter(Boolean).length;
+      setWordCount(wc);
+      debouncedSave(text, html, wc);
     },
     [debouncedSave]
   );
@@ -402,8 +421,9 @@ export function ReviewMode() {
                 <div className="rounded-2xl border border-slate-200/80 bg-white p-2">
                   <CollaborativeEditor
                     ydoc={null}
-                    content={document?.textContent || ''}
+                    content={document?.htmlContent || document?.textContent || ''}
                     onChange={handleContentChange}
+                    onHtmlChange={handleHtmlChange}
                     onSelectText={handleTextSelect}
                     editable={isEditing}
                     user={{ name: teacherName, color: '#f97316' }}
@@ -669,11 +689,18 @@ export function ReviewMode() {
               <CommentsSidebar
                 comments={wsComments}
                 canComment={true}
+                currentUserId={user?.uid}
+                canResolve={true}
                 selectedQuote={wsSelectedQuote}
                 highlightColor={wsHighlightColor}
                 onHighlightColorChange={setWsHighlightColor}
                 onClearSelection={() => setWsSelectedQuote(null)}
                 onAddComment={handleAddWsComment}
+                onResolveThread={(commentId) => resolveWritingComment(commentId, user?.uid || '')}
+                onReopenThread={(commentId) => reopenWritingComment(commentId)}
+                onEditComment={(commentId, body) => updateWritingComment(commentId, body)}
+                onDeleteReply={(commentId) => deleteWritingReply(commentId)}
+                onSoftDeleteThread={(commentId) => softDeleteWritingComment(commentId, user?.uid || '')}
               />
             </div>
           </div>

@@ -28,6 +28,7 @@ export interface Group {
   prompt?: string;
   maxMembers?: number;
   members: Member[];
+  memberIds?: string[];
   status: 'WRITING' | 'SUBMITTED' | 'LOCKED' | 'REVIEWING' | 'REVIEWED';
   locked: boolean;
   submittedAt?: number | null;
@@ -159,6 +160,73 @@ export interface WritingComment {
   anchorEnd?: number | null;
   documentRevision?: number | null;
   createdAt: number;
+  updatedAt?: number;
+  editedAt?: number | null;
+  status?: 'open' | 'resolved';
+  resolvedAt?: number | null;
+  resolvedBy?: string | null;
+  isDeleted?: boolean;
+  deletedAt?: number | null;
+  deletedBy?: string | null;
+}
+
+export interface ChecklistCriterion {
+  criterionId: string;
+  text: string;
+  order: number;
+}
+
+export interface ChecklistVersion {
+  id: string;
+  classId: string;
+  versionNumber: number;
+  criteria: ChecklistCriterion[];
+  criterionIds: string[];
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface PeerReviewDraft {
+  id: string;
+  classId: string;
+  reviewerGroupId: string;
+  targetGroupId: string;
+  checklistVersionId: string;
+  overallFeedback: string;
+  status: 'draft' | 'submitted';
+  createdBy: string;
+  createdAt: number;
+  updatedBy: string;
+  updatedAt: number;
+  submittedBy: string | null;
+  submittedAt: number | null;
+  revision: number;
+  reviewedDocumentRevision?: number | null;
+}
+
+export interface PeerReviewPublished {
+  id: string;
+  classId: string;
+  reviewerGroupId: string;
+  targetGroupId: string;
+  checklistVersionId: string;
+  overallFeedback: string;
+  status: 'submitted';
+  createdBy: string;
+  createdAt: number;
+  updatedBy: string;
+  updatedAt: number;
+  submittedBy: string;
+  submittedAt: number;
+  revision: number;
+  reviewedDocumentRevision?: number | null;
+}
+
+export interface ChecklistResponse {
+  criterionId: string;
+  checked: boolean;
+  updatedBy: string;
+  updatedAt: number;
 }
 
 export interface Vote {

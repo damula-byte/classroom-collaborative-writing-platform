@@ -12,6 +12,13 @@ interface CommentsSidebarProps {
   onHighlightColorChange: (color: HighlightColor) => void;
   onClearSelection: () => void;
   onAddComment: (body: string, parentId?: string | null) => Promise<void>;
+  currentUserId?: string | null;
+  canResolve?: boolean;
+  onResolveThread?: (commentId: string) => Promise<void>;
+  onReopenThread?: (commentId: string) => Promise<void>;
+  onEditComment?: (commentId: string, body: string) => Promise<void>;
+  onDeleteReply?: (commentId: string) => Promise<void>;
+  onSoftDeleteThread?: (commentId: string) => Promise<void>;
 }
 
 export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
@@ -22,16 +29,27 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
   onHighlightColorChange,
   onClearSelection,
   onAddComment,
+  currentUserId,
+  canResolve = false,
+  onResolveThread,
+  onReopenThread,
+  onEditComment,
+  onDeleteReply,
+  onSoftDeleteThread,
 }) => {
   const [newBody, setNewBody] = useState('');
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyBody, setReplyBody] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [filter, setFilter] = useState<'open' | 'resolved' | 'all'>('open');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingBody, setEditingBody] = useState('');
 
   const { roots, repliesByParent } = useMemo(() => {
     const rootsList: WritingComment[] = [];
     const map: Record<string, WritingComment[]> = {};
     for (const c of comments) {
+      if (c.isDeleted) continue;
       if (!c.parentId) {
         rootsList.push(c);
       } else {
@@ -39,8 +57,15 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
         map[c.parentId].push(c);
       }
     }
-    return { roots: rootsList, repliesByParent: map };
-  }, [comments]);
+    const filteredRoots = rootsList.filter((root) =>
+      filter === 'all'
+        ? true
+        : filter === 'resolved'
+          ? root.status === 'resolved'
+          : root.status !== 'resolved'
+    );
+    return { roots: filteredRoots, repliesByParent: map };
+  }, [comments, filter]);
 
   const handleSubmitRoot = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,8 +99,23 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
           <h3 className="text-base font-extrabold text-slate-900">Comments</h3>
         </div>
         <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-bold text-slate-600">
-          {comments.length}
+          {comments.filter((comment) => !comment.parentId && !comment.isDeleted && comment.status !== 'resolved').length} open
         </span>
+      </div>
+      <div className="flex gap-1 pt-3">
+        {(['open', 'resolved', 'all'] as const).map((value) => (
+          <button
+            type="button"
+            key={value}
+            onClick={() => setFilter(value)}
+            className={cn(
+              'rounded-full px-2.5 py-1 text-[11px] font-bold capitalize',
+              filter === value ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500'
+            )}
+          >
+            {value}
+          </button>
+        ))}
       </div>
 
       {/* Comment list */}
@@ -127,9 +167,79 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
                   </blockquote>
                 )}
 
-                <p className="mt-2.5 text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-                  {comment.body}
-                </p>
+                {editingId === comment.id ? (
+                  <div className="mt-2.5 space-y-2">
+                    <textarea
+                      rows={2}
+                      value={editingBody}
+                      onChange={(event) => setEditingBody(event.target.value)}
+                      className="ws-field text-sm resize-none"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!editingBody.trim() || !onEditComment) return;
+                          await onEditComment(comment.id, editingBody.trim());
+                          setEditingId(null);
+                        }}
+                        className="text-xs font-bold text-green-700"
+                      >
+                        Save
+                      </button>
+                      <button type="button" onClick={() => setEditingId(null)} className="text-xs font-bold text-slate-500">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-2.5 text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
+                    {comment.body}
+                  </p>
+                )}
+
+                {comment.authorId === currentUserId && (
+                  <div className="mt-2 flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingId(comment.id);
+                        setEditingBody(comment.body);
+                      }}
+                      className="text-[11px] font-bold text-slate-500 hover:text-slate-800"
+                    >
+                      Edit
+                    </button>
+                    {onSoftDeleteThread && (
+                      <button
+                        type="button"
+                        onClick={() => onSoftDeleteThread(comment.id)}
+                        className="text-[11px] font-bold text-red-500"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {canResolve && comment.status !== 'resolved' && onResolveThread && (
+                  <button
+                    type="button"
+                    onClick={() => onResolveThread(comment.id)}
+                    className="mt-2 text-[11px] font-bold text-orange-600"
+                  >
+                    Resolve
+                  </button>
+                )}
+                {canResolve && comment.status === 'resolved' && onReopenThread && (
+                  <button
+                    type="button"
+                    onClick={() => onReopenThread(comment.id)}
+                    className="mt-2 text-[11px] font-bold text-orange-600"
+                  >
+                    Reopen
+                  </button>
+                )}
 
                 {canComment && (
                   <button
@@ -164,9 +274,54 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
                               {replyTeacher ? 'Teacher' : 'Student'}
                             </span>
                           </div>
-                          <p className="mt-1.5 text-xs text-slate-700 whitespace-pre-wrap leading-relaxed">
-                            {reply.body}
-                          </p>
+                          {editingId === reply.id ? (
+                            <div className="mt-1.5 space-y-2">
+                              <textarea
+                                rows={2}
+                                value={editingBody}
+                                onChange={(event) => setEditingBody(event.target.value)}
+                                className="ws-field text-xs resize-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (!editingBody.trim() || !onEditComment) return;
+                                  await onEditComment(reply.id, editingBody.trim());
+                                  setEditingId(null);
+                                }}
+                                className="text-[11px] font-bold text-green-700"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          ) : (
+                            <p className="mt-1.5 text-xs text-slate-700 whitespace-pre-wrap leading-relaxed">
+                              {reply.body}
+                            </p>
+                          )}
+                          {reply.authorId === currentUserId && (
+                            <div className="mt-1.5 flex gap-3">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingId(reply.id);
+                                  setEditingBody(reply.body);
+                                }}
+                                className="text-[10px] font-bold text-slate-500"
+                              >
+                                Edit
+                              </button>
+                              {onDeleteReply && (
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteReply(reply.id)}
+                                  className="text-[10px] font-bold text-red-500"
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       );
                     })}

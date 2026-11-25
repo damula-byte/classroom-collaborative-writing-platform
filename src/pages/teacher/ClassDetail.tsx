@@ -19,8 +19,10 @@ import {
   resumeClassTimer,
   resetClassTimer,
   finalizeExpiredTimerIdempotent,
+  subscribeToActivePeerReviewChecklist,
+  savePeerReviewChecklist,
 } from '@/services';
-import { Vote } from '@/types';
+import { Vote, ChecklistVersion } from '@/types';
 import { BRANDING } from '@/config/branding';
 import { calculateWinners, clampVotesPerStudent, clampMaxMembers } from '@/utils';
 import {
@@ -154,7 +156,7 @@ function GroupForm({ open, onClose, onSubmit }: GroupFormProps) {
 export function ClassDetail() {
   const { classId } = useParams<{ classId: string }>();
   const navigate = useNavigate();
-  const { teacherName, logout } = useAuth();
+  const { user, teacherName, logout } = useAuth();
   const { cls, loading: classLoading } = useClass(classId || null);
   const { groups, loading: groupsLoading } = useGroups(classId || null);
 
@@ -171,6 +173,8 @@ export function ClassDetail() {
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [copiedCode, setCopiedCode] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [activeChecklist, setActiveChecklist] = useState<ChecklistVersion | null>(null);
+  const [checklistDraft, setChecklistDraft] = useState<Array<{ criterionId?: string; text: string; order: number }>>([]);
 
   // Fetch actual student count & subscribe to votes
   useEffect(() => {
@@ -179,7 +183,20 @@ export function ClassDetail() {
       setStudentCount(count);
     });
     const unsubVotes = subscribeToVotes(classId, setVotes);
-    return () => unsubVotes();
+    const unsubChecklist = subscribeToActivePeerReviewChecklist(classId, (version) => {
+      setActiveChecklist(version);
+      if (version) {
+        setChecklistDraft(version.criteria.map((criterion) => ({
+          criterionId: criterion.criterionId,
+          text: criterion.text,
+          order: criterion.order,
+        })));
+      }
+    });
+    return () => {
+      unsubVotes();
+      unsubChecklist();
+    };
   }, [classId]);
 
   // Synchronized timer ticker + idempotent expiration reconciliation
@@ -263,6 +280,19 @@ export function ClassDetail() {
       await updateClass(classId, { votesPerStudent: clamped });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to update vote limit', type: 'error' });
+    }
+  };
+
+  const handleSaveChecklist = async () => {
+    if (!classId || !user?.uid) return;
+    try {
+      await savePeerReviewChecklist(classId, checklistDraft, user.uid);
+      setToast({ message: 'Peer Review Checklist saved.', type: 'success' });
+    } catch (error: unknown) {
+      setToast({
+        message: error instanceof Error ? error.message : 'Failed to save checklist.',
+        type: 'error',
+      });
     }
   };
 
@@ -764,6 +794,93 @@ export function ClassDetail() {
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* Peer Review Checklist configuration */}
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500">
+                    <Check size={14} className="text-green-600" /> Peer Review Checklist
+                  </span>
+                  {activeChecklist && (
+                    <span className="text-[11px] font-bold text-slate-400">Version {activeChecklist.versionNumber}</span>
+                  )}
+                </div>
+                {checklistDraft.length === 0 ? (
+                  <p className="text-xs text-slate-400">No checklist provided yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {checklistDraft.map((criterion, index) => (
+                      <div key={criterion.criterionId || `new-${index}`} className="flex gap-2">
+                        <input
+                          value={criterion.text}
+                          onChange={(event) => {
+                            setChecklistDraft((draft) => draft.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, text: event.target.value } : item
+                            ));
+                          }}
+                          className="ws-field flex-1 py-2 text-xs"
+                        />
+                        <button
+                          type="button"
+                          disabled={index === 0}
+                          onClick={() => setChecklistDraft((draft) => {
+                            const next = [...draft];
+                            [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                            return next.map((item, itemIndex) => ({ ...item, order: itemIndex }));
+                          })}
+                          className="rounded-xl border border-slate-200 px-2 text-slate-500 disabled:opacity-30"
+                          aria-label="Move criterion up"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          disabled={index === checklistDraft.length - 1}
+                          onClick={() => setChecklistDraft((draft) => {
+                            const next = [...draft];
+                            [next[index], next[index + 1]] = [next[index + 1], next[index]];
+                            return next.map((item, itemIndex) => ({ ...item, order: itemIndex }));
+                          })}
+                          className="rounded-xl border border-slate-200 px-2 text-slate-500 disabled:opacity-30"
+                          aria-label="Move criterion down"
+                        >
+                          ↓
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setChecklistDraft((draft) =>
+                            draft.filter((_, itemIndex) => itemIndex !== index).map((item, itemIndex) => ({
+                              ...item,
+                              order: itemIndex,
+                            }))
+                          )}
+                          className="rounded-xl border border-red-200 px-2 text-red-500"
+                          aria-label="Remove criterion"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setChecklistDraft((draft) => [
+                    ...draft,
+                    { text: '', order: draft.length },
+                  ])}
+                  className="ws-btn-secondary w-full py-2 text-xs"
+                >
+                  <Plus size={13} /> Add criterion
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveChecklist}
+                  className="ws-btn-primary w-full py-2 text-xs"
+                >
+                  Save checklist
+                </button>
               </div>
 
               {/* Votes per student configuration */}

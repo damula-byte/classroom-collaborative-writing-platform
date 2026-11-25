@@ -442,3 +442,66 @@ stateDiagram-v2
 2. **Version History & Diff Viewer**: Step-by-step playback of document evolution and individual student contribution attribution.
 3. **Peer Review Mode**: Teacher can dynamically allow Group 1 to review Group 2's document with restricted comment-only privileges.
 4. **Export Capabilities**: Export final essay with annotations to PDF, Word docx, or Google Docs.
+
+## 13. Phase 1 Peer Review Foundation
+
+Phase 1 establishes the group Peer Review architecture without adding UI workflows.
+
+### Canonical review identity
+
+One shared review is identified by:
+
+```text
+classId + reviewerGroupId + targetGroupId
+pairId = reviewerGroupId + "__" + targetGroupId
+```
+
+The pair is stored below the class:
+
+```text
+classes/{classId}/peerReviewDrafts/{pairId}
+classes/{classId}/peerReviews/{pairId}
+```
+
+Private checklist responses are per-criterion subdocuments under the draft:
+
+```text
+classes/{classId}/peerReviewDrafts/{pairId}/responses/{criterionId}
+```
+
+Submitted responses are copied to the published peer-review result:
+
+```text
+classes/{classId}/peerReviews/{pairId}/responses/{criterionId}
+```
+
+This split prevents target groups and other students from reading private working drafts.
+
+### Checklist versioning
+
+Class-level configuration uses:
+
+```text
+classes/{classId}/peerReviewChecklist/active
+classes/{classId}/checklistVersions/{versionId}
+```
+
+The active configuration points to an immutable version. A version contains stable
+`criterionId`, criterion text and display order. Array position is never the identity.
+
+### Concurrency
+
+Checklist responses use independent criterion subdocuments, so separate members can
+tick different criteria concurrently. Overall feedback updates use a revision counter
+and Firestore transaction. Submission copies draft data into a published result atomically
+and preserves the checklist version used by the review.
+
+### Membership
+
+Review authorization rechecks:
+
+- canonical student `groupId`
+- current `memberIds` on the group when present
+- existing `Group.members` for backward compatibility
+- reviewer and target submitted status
+- reviewer != target
