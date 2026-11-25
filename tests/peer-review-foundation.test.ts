@@ -61,6 +61,15 @@ describe('Phase 1 Peer Review Foundation', () => {
     expect(rulesContent).toContain('voterUid == request.auth.uid');
   });
 
+  test('editor enables undo history outside collaboration mode', () => {
+    const editorContent = readFileSync(
+      resolve(__dirname, '../src/components/editor/CollaborativeEditor.tsx'),
+      'utf-8'
+    );
+    expect(editorContent).toContain('...(ydoc');
+    expect(editorContent).toContain(': [StarterKit])');
+  });
+
   test('draft updates cannot change private review state', () => {
     const draftUpdate = rulesContent.match(
       /match \/classes\/\{classId\}\/peerReviewDrafts\/\{pairId\}[\s\S]*?allow update: if[\s\S]*?allow delete/

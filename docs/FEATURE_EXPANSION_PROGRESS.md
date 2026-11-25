@@ -61,4 +61,5 @@ No major dependency upgrade was performed.
 - The existing Yjs collaboration wiring remains `ydoc={null}` as approved by AGENTS.md.
 - Direct multi-client concurrent editing and browser visual verification remain NOT RUN.
 - Submission transactions should receive further emulator coverage for published/draft atomicity.
+- Student editor Undo/Redo fixed by enabling StarterKit history when `ydoc` is null.
 - No production deployment or migration was performed.

@@ -29,9 +29,13 @@ export function CollaborativeEditor({
 }: CollaborativeEditorProps) {
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({
-        history: false,
-      }),
+      ...(ydoc
+        ? [
+            StarterKit.configure({
+              history: false,
+            }),
+          ]
+        : [StarterKit]),
       Underline,
       TextAlign.configure({
         types: ['heading', 'paragraph'],
